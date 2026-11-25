@@ -1,0 +1,349 @@
+{
+  "name": "II - Slot Cascade (WF-B)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ii-slot-cascade",
+        "options": {}
+      },
+      "id": "952ed6f8-d929-4452-aa85-e4839433ae72",
+      "name": "Webhook (slot cancelled)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -864,
+        80
+      ],
+      "webhookId": "ii-slot-cascade",
+      "notes": "Fired by trg_notify_n8n_slot_cancelled. Payload: { type:'slot_cancelled', slot_id, clinic_id, start_time }. After activating, set private.app_config.n8n_cascade_webhook_url to this node's Production URL."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.headers['x-webhook-secret'] }}",
+              "rightValue": "={{ $env.II_WEBHOOK_SECRET }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "457b464b-d8a7-4e26-9b42-e5a9edd9cf5f",
+      "name": "Verify secret",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        80
+      ],
+      "notes": "II_WEBHOOK_SECRET = private.app_config.n8n_webhook_secret."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/cascade_offer_next",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_slot_id\": \"{{ $('Webhook (slot cancelled)').item.json.body.slot_id }}\" }",
+        "options": {}
+      },
+      "id": "c66fa4b3-5ea6-4cb0-8ea1-83f68e9dc7d5",
+      "name": "cascade_offer_next",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -448,
+        80
+      ],
+      "notes": "Fat RPC: picks the single best candidate, writes the cascade_offer + conversation, returns a status envelope. status='offer' means we have someone to text; anything else (noop/cutoff/exhausted/no_candidates) ends the run."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "offer",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "30920c1a-17fd-4c74-a5e4-d0f9ee4fa3ac",
+      "name": "Got a candidate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        80
+      ],
+      "notes": "True -> generate + send the offer. False -> stop (slot stays cancelled; a later decline/expiry sweep may re-post it)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_context",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $('cascade_offer_next').item.json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "ef2f84a3-6892-4cc1-9cad-89dca3e85b14",
+      "name": "agent_context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Reused from WF-A. Gives us clinic_name + patient for the persona. The conversation has no messages yet — this is agent-initiated."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const offer = $('cascade_offer_next').item.json;\nconst ctx = $('agent_context').item.json;\nconst zone = 'Europe/Lisbon';\nconst fmtTime = (iso) => DateTime.fromISO(iso).setZone(zone).toFormat('HH:mm');\nconst dayWord = (iso) => {\n  const d = DateTime.fromISO(iso).setZone(zone).startOf('day');\n  const today = DateTime.now().setZone(zone).startOf('day');\n  const diff = Math.round(d.diff(today, 'days').days);\n  if (diff === 0) return 'hoje';\n  if (diff === 1) return 'amanhã';\n  return DateTime.fromISO(iso).setZone(zone).toFormat('dd/MM');\n};\nconst clinic = ctx.clinic_name || 'a clínica';\nconst patient = (offer.patient && offer.patient.name) || (ctx.patient && ctx.patient.name) || '';\nconst firstName = patient ? patient.split(' ')[0] : '';\nconst doctor = offer.freed_slot.doctor_name || '';\n// Exact, pre-formatted facts. The model must copy these verbatim.\nconst freedClause = dayWord(offer.freed_slot.start_time) + ' às ' + fmtTime(offer.freed_slot.start_time);\nlet facts = 'Vaga que abriu: ' + freedClause + (doctor ? (' com ' + doctor) : '') + '.';\nif (offer.candidate_slot && offer.candidate_slot.start_time) {\n  facts += ' Marcação atual do paciente: ' + dayWord(offer.candidate_slot.start_time) + ' às ' + fmtTime(offer.candidate_slot.start_time) + '.';\n  facts += ' Objetivo: perguntar de forma simpática se prefere trocar a marcação atual por esta vaga mais cedo.';\n} else {\n  facts += ' O paciente está em lista de espera. Objetivo: perguntar de forma simpática se tem interesse nesta vaga.';\n}\nconst system = 'É rececionista da ' + clinic + ', em Portugal, e escreve como uma pessoa real: cordial, natural e breve. '\n  + 'Português europeu formal (\"você\"). Nunca se apresenta nem inventa um nome. '\n  + (firstName ? ('Trate o paciente por \"' + firstName + '\". ') : '')\n  + 'Escreva UMA mensagem curta (1-2 frases) que oferece a vaga e convida a uma resposta livre e natural '\n  + '(por ex. \"diga-me se lhe convém\" ou \"é só responder\"). NUNCA peça um formato rígido tipo \"responda SIM ou NÃO\". '\n  + 'REGRA ABSOLUTA: copie horas, datas e nomes EXATAMENTE como aparecem nos factos abaixo; nunca invente nem altere um número. '\n  + 'Termine sempre com: Responda STOP para não receber mais mensagens. '\n  + 'Responda APENAS com o texto da mensagem.';\nreturn { json: { conversation_id: offer.conversation_id, system_prompt: system, user_prompt: facts } };"
+      },
+      "id": "36c8bcdc-2bfb-41e9-ba4e-d155f62ce80b",
+      "name": "Build offer prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "notes": "Formats the freed/candidate times in Europe/Lisbon and assembles the system + user prompts. No medical data leaves the DB — only names + times."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Build offer prompt').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.text.replace(/<think>[\\s\\S]*?<\\/think>/gi, '').trim()) }}\n}",
+        "options": {}
+      },
+      "id": "93544f5c-383e-478d-80aa-b7f41e05307f",
+      "name": "agent_send_message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        768,
+        0
+      ],
+      "notes": "Posts the offer with the service_role key -> lands in the /sms thread and staff /conversations console. Won't re-trigger n8n (agent messages don't fire the inbound trigger)."
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0.2,
+          "maxTokensToSample": 4096
+        }
+      },
+      "id": "0984cd51-0830-4bb3-a47a-aed20aea70e6",
+      "name": "Groq model (offer)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        368,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "075b14ce-e0df-4c64-9088-992b2841ec96",
+      "name": "Gemini model (offer fallback)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        528,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=/no_think\n\n{{ $('Build offer prompt').item.json.system_prompt }}\n\n{{ $('Build offer prompt').item.json.user_prompt }}",
+        "needsFallback": true,
+        "batching": {}
+      },
+      "id": "e0d01511-b723-4494-8532-a8e1873d322a",
+      "name": "Generate offer (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        448,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook (slot cancelled)": {
+      "main": [
+        [
+          {
+            "node": "Verify secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify secret": {
+      "main": [
+        [
+          {
+            "node": "cascade_offer_next",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "cascade_offer_next": {
+      "main": [
+        [
+          {
+            "node": "Got a candidate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Got a candidate?": {
+      "main": [
+        [
+          {
+            "node": "agent_context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agent_context": {
+      "main": [
+        [
+          {
+            "node": "Build offer prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build offer prompt": {
+      "main": [
+        [
+          {
+            "node": "Generate offer (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate offer (LLM)": {
+      "main": [
+        [
+          {
+            "node": "agent_send_message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq model (offer)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate offer (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini model (offer fallback)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate offer (LLM)",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  }
+}

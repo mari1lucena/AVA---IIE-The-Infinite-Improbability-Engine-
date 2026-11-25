@@ -1,0 +1,234 @@
+{
+  "name": "II - Pull Forward (WF-D)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ii-pullforward",
+        "options": {}
+      },
+      "id": "pf-webhook",
+      "name": "Webhook (phase 2)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        0
+      ],
+      "notes": "Webhook (phase 2)",
+      "webhookId": "ii-pullforward"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.headers['x-webhook-secret'] }}",
+              "rightValue": "={{ $env.II_WEBHOOK_SECRET }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pf-verify",
+      "name": "Verify secret",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -520,
+        0
+      ],
+      "notes": "Verify secret"
+    },
+    {
+      "parameters": {
+        "amount": "={{ $env.PHASE2_DELAY_SECONDS }}",
+        "unit": "seconds"
+      },
+      "id": "pf-wait",
+      "name": "Wait (phase 2 delay)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -300,
+        0
+      ],
+      "webhookId": "ii-pullforward-wait",
+      "notes": "Delays phase 2 by PHASE2_DELAY_SECONDS (dev: 90s; prod: next morning)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/pullforward_offer_next",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "options": {}
+      },
+      "id": "pf-offer",
+      "name": "pullforward_offer_next",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        0
+      ],
+      "notes": "pullforward_offer_next"
+    },
+    {
+      "parameters": {
+        "jsCode": "// PostgREST returns a JSON array for setof-json RPCs. Normalise to one n8n\n// item per row, regardless of how this n8n version wraps the response.\nconst out = [];\nfor (const it of $input.all()) {\n  const j = it.json;\n  if (Array.isArray(j)) { for (const r of j) out.push({ json: r }); }\n  else if (j && Array.isArray(j.data)) { for (const r of j.data) out.push({ json: r }); }\n  else if (j && j.conversation_id) { out.push({ json: j }); }\n}\nreturn out;"
+      },
+      "id": "pf-fanout",
+      "name": "Fan out offers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        0
+      ],
+      "notes": "Fan out offers"
+    },
+    {
+      "parameters": {
+        "jsCode": "const o = $json; // one pullforward offer row\nconst zone = 'Europe/Lisbon';\nconst fmt = (iso) => { const d = DateTime.fromISO(iso).setZone(zone); const today = DateTime.now().setZone(zone).startOf('day'); const diff = Math.round(d.startOf('day').diff(today,'days').days); const day = diff===0?'hoje':(diff===1?'amanhã':d.toFormat('dd/MM')); return day + ' às ' + d.toFormat('HH:mm'); };\nconst name = (o.patient && o.patient.name) ? o.patient.name.split(' ')[0] : '';\nconst cur = fmt(o.current_slot.start_time);\nconst earlier = fmt(o.earlier_slot.start_time);\nconst doc = o.earlier_slot.doctor_name ? (' com ' + o.earlier_slot.doctor_name) : '';\nconst message = (name ? ('Olá ' + name + ', ') : '') + 'tem consulta marcada para ' + cur + '. Abriu agora uma vaga mais cedo, ' + earlier + doc + ' — se preferir, é só responder que trato da troca. Responda STOP para não receber mais mensagens.';\nreturn { json: { conversation_id: o.conversation_id, message } };",
+        "mode": "runOnceForEachItem",
+        "language": "javaScript"
+      },
+      "id": "pf-build",
+      "name": "Build pull-forward msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        0
+      ],
+      "notes": "Deterministic offer text with exact Lisbon times. offered_slot_ids already set by the RPC, so a reply routes to WF-A's booking-choice branch."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Build pull-forward msg').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($('Build pull-forward msg').item.json.message) }}\n}",
+        "options": {}
+      },
+      "id": "pf-send",
+      "name": "agent_send_message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        0
+      ],
+      "notes": "agent_send_message"
+    }
+  ],
+  "connections": {
+    "Webhook (phase 2)": {
+      "main": [
+        [
+          {
+            "node": "Verify secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify secret": {
+      "main": [
+        [
+          {
+            "node": "Wait (phase 2 delay)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Wait (phase 2 delay)": {
+      "main": [
+        [
+          {
+            "node": "pullforward_offer_next",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pullforward_offer_next": {
+      "main": [
+        [
+          {
+            "node": "Fan out offers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan out offers": {
+      "main": [
+        [
+          {
+            "node": "Build pull-forward msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build pull-forward msg": {
+      "main": [
+        [
+          {
+            "node": "agent_send_message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,1397 @@
+{
+  "name": "II - Agent Pilot (Tool Calling)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ii-agent-pilot",
+        "options": {}
+      },
+      "id": "pilot-webhook",
+      "name": "Webhook (pilot test)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1408,
+        368
+      ],
+      "webhookId": "ii-agent-pilot",
+      "notes": "Manual test entrypoint for benchmarking against WF-A. NOT wired to any live DB trigger. Body: { conversation_id }, header x-webhook-secret. Use mock_sms_inbound first to add the patient message to a conversation, then POST here with that conversation_id to see how the tool-calling agent handles the same state WF-A would receive."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.headers['x-webhook-secret'] }}",
+              "rightValue": "={{ $env.II_WEBHOOK_SECRET }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-verify-secret",
+      "name": "Verify secret",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1184,
+        368
+      ],
+      "notes": "Same secret as WF-A. False branch is a dead end (bad/forged request)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_context",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $('Check opt-out').item.json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "pilot-agent-context",
+      "name": "agent_context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        224
+      ],
+      "notes": "Same RPC WF-A uses. Reads the conversation state exactly as it stands (messages, patient, primary doctor, related_slot, offered_slots, cancel_pending, doctors roster)."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $json;\nconst patient = ctx.patient || {};\nconst doctors = ctx.doctors || [];\nconst messages = ctx.messages || [];\nconst relatedSlot = ctx.related_slot || null;\nconst offeredSlots = ctx.offered_slots || [];\nconst zone = 'Europe/Lisbon';\nconst today = DateTime.now().setZone(zone).toFormat(\"yyyy-MM-dd (cccc)\");\nconst _pt = ['segunda-feira','terça-feira','quarta-feira','quinta-feira','sexta-feira','sábado','domingo'];\nconst _now = DateTime.now().setZone(zone);\nconst _next14 = [];\nfor (let _i = 0; _i < 14; _i++) { const _d = _now.plus({ days: _i }); const _lab = _i === 0 ? ' (hoje)' : (_i === 1 ? ' (amanhã)' : ''); _next14.push(_d.toFormat('dd/MM/yyyy') + ' = ' + _pt[_d.weekday - 1] + _lab); }\nconst _prox = [];\nfor (let _w = 1; _w <= 7; _w++) { let _d = _now.plus({ days: 1 }); while (_d.weekday !== _w) _d = _d.plus({ days: 1 }); _prox.push('próxima ' + _pt[_w - 1] + ' = ' + _d.toFormat('dd/MM/yyyy')); }\nconst isPlaceholder = /^Novo contacto /.test(patient.name || '');\nconst fmt = (iso) => { try { return DateTime.fromISO(iso, { setZone: true }).setZone(zone).toFormat(\"dd/MM/yyyy 'às' HH:mm\"); } catch (e) { return iso; } };\n\nconst lines = [];\nlines.push('Data de hoje em Lisboa: ' + today + '.');\nlines.push('TABELA DE DATAS (Lisboa) — use SEMPRE estes valores para qualquer data relativa; NUNCA calcule datas nem dias da semana de cabeça:');\nlines.push('  Próximos dias: ' + _next14.join('; ') + '.');\nlines.push('  Referências: ' + _prox.join('; ') + '.');\nlines.push('Clínica: ' + (ctx.clinic_name || 'a clínica') + '.');\nlines.push('Paciente: ' + (isPlaceholder ? '(nome ainda desconhecido — placeholder interno, NUNCA o use ao falar com o paciente; se ele disser o nome, registe-o com patient_set_name)' : (patient.name || '(sem nome ainda)')) + '.');\nlines.push(patient.primary_doctor_name ? ('Médico habitual do paciente: ' + patient.primary_doctor_name + (patient.primary_doctor_id ? (' (id: ' + patient.primary_doctor_id + ')') : '') + '.') : 'O paciente ainda não tem médico habitual atribuído.');\nlines.push('Tipo de conversa: ' + (ctx.conversation_type || 'general') + '.');\nif (relatedSlot && relatedSlot.doctor_name) {\n  lines.push('Vaga relacionada com esta conversa (facto — hora de Lisboa, não converta): ' + fmt(relatedSlot.start_time) + ' com ' + relatedSlot.doctor_name + '.');\n}\nif (offeredSlots && offeredSlots.length) {\n  lines.push('Vagas JÁ oferecidas nesta conversa (o paciente pode estar a escolher uma destas; horas de Lisboa):');\n  for (const s of offeredSlots) {\n    lines.push('  • slot_id ' + s.slot_id + ' — ' + fmt(s.start_time) + (s.doctor_name ? (' com ' + s.doctor_name) : ''));\n  }\n}\nif (ctx.cancel_pending) {\n  lines.push('Nota: já foi sugerido ao paciente remarcar em vez de cancelar. Se ele insistir agora em cancelar, use cancel_booking (que desta vez cancela mesmo).');\n}\nif (doctors && doctors.length) {\n  lines.push('Médicos da clínica (nome — id, use o id exato em p_doctor_id): ' + doctors.map(d => d.name + ' — ' + d.id).join('; ') + '.');\n}\nlines.push('');\nlines.push('Histórico da conversa (mais antigo primeiro):');\nlet lastPatient = '';\nfor (const m of messages) {\n  const who = m.sender_type === 'patient' ? 'Paciente' : (m.sender_type === 'agent' ? 'Agente' : 'Staff');\n  lines.push(who + ': ' + m.body);\n  if (m.sender_type === 'patient') lastPatient = m.body;\n}\nlines.push('');\nif (lastPatient) {\n  lines.push('MENSAGEM MAIS RECENTE DO PACIENTE (é a esta que deve responder): \"' + lastPatient + '\"');\n}\nlines.push('Primeiro perceba o que o paciente quer; se não for claro, faça UMA pergunta curta em vez de adivinhar ou agir. Use ferramentas só quando precisar de dados reais ou de agir sobre a marcação.');\n\nif (isPlaceholder) {\n  lines.push('IMPORTANTE: o nome deste paciente ainda é desconhecido. Se concretizar uma marcação nesta conversa, peça o nome na própria mensagem de confirmação (ex.: \"…pode dizer-me o seu nome?\") para o poder registar com patient_set_name.');\n}\n\n\n// --- Agent presentation settings (from /settings -> Agente, via agent_context) ---\nconst A = ctx.agent_settings || {};\nconst _pres = [];\n_pres.push(A.name ? ('Apresenta-te como \"' + A.name + '\" quando fizer sentido (ex.: no cumprimento).') : 'Nao uses um nome proprio para te apresentares.');\n_pres.push(A.tone === 'informal' ? 'Trata o paciente por tu (informal), de forma calorosa e natural.' : 'Trata o paciente por voce (formal).');\n_pres.push(A.language === 'mirror' ? 'Responde SEMPRE no mesmo idioma da ultima mensagem do paciente (portugues ou ingles).' : 'Responde sempre em portugues europeu.');\n_pres.push(A.use_emoji ? 'Podes usar emojis com moderacao.' : 'Nao uses emojis.');\nif (A.signature) _pres.push('Termina a mensagem com a assinatura: \"' + A.signature + '\".');\nif (A.custom_instructions) _pres.push('Instrucoes adicionais da clinica: ' + A.custom_instructions);\nlines.push('');\nlines.push('APRESENTACAO E ESTILO (aplica-se a forma como escreves; NUNCA altera as regras de marcacao, cancelamento nem o aviso STOP/RGPD):');\nfor (const _p of _pres) lines.push('  - ' + _p);\n\nreturn { json: { conversation_id: ctx.conversation_id, text: lines.join('\\n') } };"
+      },
+      "id": "pilot-build-prompt",
+      "name": "Build agent prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        224
+      ],
+      "notes": "Formats agent_context into one structured prompt for the AI Agent node's per-turn user message. The Agent's persona + hard rules live in the AI Agent node's own System Message (static), not here."
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0.2,
+          "maxTokensToSample": 4096
+        }
+      },
+      "id": "pilot-groq-model",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        624,
+        352
+      ],
+      "notes": "Needs a 'groqApi' credential (apiKey only) bound — none exists in this instance yet, only the httpHeaderAuth one used by WF-A/B/C's raw HTTP nodes. Create one (Credentials > New > Groq API) and it can be bound to this node.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "toolDescription": "Procura vagas REAIS disponíveis na agenda da clínica. Use sempre antes de propor qualquer horário ao paciente — nunca invente horários ou nomes de médicos. p_doctor_id deve ser um id exato copiado da lista de médicos da clínica fornecida no contexto (nunca um nome, nunca inventado). Devolve slot_id, doctor_name e DOIS campos de horário: start_time (UTC — NUNCA use este) e start_time_lisbon (hora de Lisboa já convertida, DD/MM/YYYY HH:MM — use SEMPRE este). Nunca invente um slot_id que não veio daqui.",
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/find_availability_window",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_conversation_id",
+              "value": "={{ $('Build agent prompt').item.json.conversation_id }}"
+            },
+            {
+              "name": "p_date",
+              "value": "={{ $fromAI('p_date', 'dia pedido pelo paciente ou o dia da vaga já em discussão, formato YYYY-MM-DD; string vazia se não souber', 'string', '') }}"
+            },
+            {
+              "name": "p_from",
+              "value": "={{ $fromAI('p_from', 'início da janela horária pedida, formato HH:MM; string vazia se não souber', 'string', '') }}"
+            },
+            {
+              "name": "p_to",
+              "value": "={{ $fromAI('p_to', 'fim da janela horária pedida, formato HH:MM; string vazia se não souber', 'string', '') }}"
+            },
+            {
+              "name": "p_limit",
+              "value": "={{ $fromAI('p_limit', 'quantas vagas devolver, default 3', 'number', 3) }}"
+            },
+            {
+              "name": "p_doctor_id",
+              "value": "={{ $fromAI('p_doctor_id', 'id exato de um médico (copiado da lista de médicos no contexto) se pedido explicitamente ou para usar o médico habitual; string vazia caso contrário', 'string', '') }}"
+            },
+            {
+              "name": "p_lock_doctor",
+              "value": "={{ false }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-tool-availability",
+      "name": "find_availability_window",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1088,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Marca o paciente numa vaga específica. SÓ pode ser chamada com um slot_id que veio de um resultado ANTERIOR de find_availability_window nesta mesma conversa, e só depois de o paciente confirmar explicitamente esse horário. Nunca invente nem reutilize um slot_id de outra conversa. A resposta inclui start_time_lisbon — use sempre esse campo ao confirmar, nunca start_time (UTC).",
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/book_slot",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_conversation_id",
+              "value": "={{ $('Build agent prompt').item.json.conversation_id }}"
+            },
+            {
+              "name": "p_slot_id",
+              "value": "={{ $fromAI('p_slot_id', 'o slot_id EXATO devolvido por uma chamada anterior a find_availability_window nesta conversa, que o paciente acabou de confirmar. Nunca invente.', 'string') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-tool-book",
+      "name": "book_slot",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1232,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Encaminha a conversa para um humano da receção. Use para questões médicas, reclamações, problemas de seguro/financeiros, frustração real, ou qualquer pedido em que não tenha confiança para agir sozinho — na dúvida, escale. Depois de chamar esta ferramenta, a resposta final deve ser curta, a confirmar que a receção vai continuar a conversa.",
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_escalate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_conversation_id",
+              "value": "={{ $('Build agent prompt').item.json.conversation_id }}"
+            },
+            {
+              "name": "p_category",
+              "value": "={{ $fromAI('p_category', 'uma de: booking_request, complaint, insurance_issue, medical_question, conversation_takeover', 'string') }}"
+            },
+            {
+              "name": "p_reason",
+              "value": "={{ $fromAI('p_reason', 'frase curta a explicar porquê', 'string') }}"
+            },
+            {
+              "name": "p_priority",
+              "value": "={{ $fromAI('p_priority', 'normal ou high', 'string', 'normal') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-tool-escalate",
+      "name": "agent_escalate",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1376,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "needsFallback": true,
+        "options": {
+          "systemMessage": "/no_think\n\nRececionista de uma clínica privada em Portugal. Escreva como pessoa real: cordial, natural, breve e DIRETA (vá direto ao assunto), português europeu formal (você). Fale SEMPRE em nome da clínica na 1ª pessoa do plural — «temos», «podemos oferecer», «não temos» — nunca «tem» nem «você tem» (a disponibilidade é da clínica, não do paciente). Nunca se apresente nem invente nome. Use só os factos da mensagem — nunca invente horários, médicos ou ids. Se uma ferramenta devolver start_time_lisbon, use SEMPRE esse valor; nunca converta fusos.\n\nINTENÇÃO PRIMEIRO: veja o que o paciente quer NA ÚLTIMA mensagem — pergunta de logística; marcar/remarcar; escolher/confirmar uma vaga já oferecida; cancelar; responder a oferta de cascata (slot_cascade) ou a confirmação do dia anterior (confirmation); dar o nome; reclamação/questão médica/seguro. Se não for claro ou misturar pedidos, NÃO adivinhe: faça UMA pergunta curta, ou procure vagas com o critério indicado. NUNCA leia uma pergunta ou preferência (\"e com o Dr. X?\", \"e à tarde?\", \"às 16h?\") como aceitação — é novo pedido.\n\nFERRAMENTAS:\n- find_availability_window: procurar vagas reais; use sempre antes de propor horários. Para qualquer data relativa (amanhã, próxima segunda, este fim de semana, etc.) use SEMPRE a TABELA DE DATAS do contexto — nunca calcule a data ou o dia da semana você mesmo. Com o médico habitual se existir; se pedir outro pelo nome, use p_doctor_id (id exato da lista no contexto). Se o habitual não tiver vaga (status='none') e não pediu outro, procure sem filtro e ofereça outro médico só desta vez, dizendo-o. HORA/PERÍODO: se o paciente indicar uma HORA específica (ex.: «às 16:00», «para as 15h»), passe essa hora em p_from e DEIXE p_to VAZIO (a RPC devolve a hora exacta se existir, senão as mais próximas); se indicar um PERÍODO (manhã/tarde/fim do dia), passe p_from e p_to a delimitá-lo; se indicar só o dia, deixe p_from e p_to vazios.\n- book_slot: marcar uma vaga devolvida nesta conversa, só após o paciente confirmar esse horário. Resposta ambígua/pergunta/pedido diferente → não marque. Se o nome do paciente ainda for desconhecido, ao confirmar a marcação peça também o nome na MESMA mensagem (ex.: «…pode dizer-me o seu nome?») para o registar depois com patient_set_name.\n- offer_accept / offer_decline: numa conversa slot_cascade (aceitar/recusar a vaga) ou confirmation (manter/desmarcar amanhã). Só com aceitação/recusa clara; se ambíguo, esclareça.\n- cancel_booking: pedido de cancelar (fora de confirmation). À 1ª chamada devolve 'nudge' → sugira REMARCAR, não confirme; só se insistir na mensagem seguinte é que a chama de novo (aí cancela). Se preferir remarcar, use find_availability_window.\n- patient_set_name: se o nome é desconhecido (ver contexto) e a mensagem o contém.\n- agent_escalate: questões médicas, reclamações, seguro/financeiro, ou qualquer dúvida — na dúvida, escale. Frustração só com linguagem claramente agressiva/insultuosa; mensagem curta/ambígua NÃO é frustração — esclareça.\n\nMarcação sem qualquer preferência de dia/hora/período: pergunte primeiro o que lhe dá jeito; não procure ainda.\n\nAO APRESENTAR VAGAS: seja direto e ofereça SÓ as vagas que a RPC devolveu (as mais próximas da hora pedida — nunca invente nem espalhe pelo dia). Se a RPC devolver exact=false, diga LOGO, na mesma mensagem e antes das alternativas, que não há vaga à hora pedida (campo 'requested') — ex.: «Não temos vaga às 16:00, mas temos às 15:45, às 16:30 ou às 15:15. Qual prefere?». Se exact=true, confirme essa hora — ex.: «Temos às 16:00, confirmo?». Nunca ofereça alternativas sem primeiro dizer que a hora pedida não está disponível.\n\nResposta final: SEMPRE uma única mensagem curta (1-3 frases) ao paciente. Nunca exponha ferramentas, raciocínio ou JSON. O STOP/opt-out é tratado antes; nunca o mencione.",
+          "maxIterations": 6,
+          "returnIntermediateSteps": true,
+          "enableStreaming": false
+        }
+      },
+      "id": "pilot-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1248,
+        112
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Pilot: replaces WF-A's Route/Route assist/Route match/booking-choice/retime/cancel branches with one tool-calling loop. Does NOT replace WF-A — this is a separate, inert workflow for side-by-side comparison."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $('Build agent prompt').item.json.conversation_id }}\", \"p_body\": {{ JSON.stringify($json.output) }} }",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "pilot-send-message",
+      "name": "agent_send_message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2224,
+        224
+      ],
+      "notes": "Delivers the Agent node's final text output the same way WF-A's 'Send reply' does — deterministic delivery stays outside the model's own choice."
+    },
+    {
+      "parameters": {
+        "toolDescription": "Regista o nome real do paciente quando ele o disser, SÓ se o paciente ainda não tem nome conhecido (indicado no contexto como nome ainda desconhecido/placeholder). Não chame se o paciente já tem um nome real registado.",
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/patient_set_name",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_conversation_id",
+              "value": "={{ $('Build agent prompt').item.json.conversation_id }}"
+            },
+            {
+              "name": "p_name",
+              "value": "={{ $fromAI('p_name', 'o nome completo do paciente, tal como ele o disse, capitalizado normalmente', 'string') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-tool-setname",
+      "name": "patient_set_name",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1536,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "pilot-gemini-fallback",
+      "name": "Gemini Chat Model (fallback)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        752,
+        352
+      ],
+      "notes": "Fallback only — used solely when the primary Groq Chat Model call fails (429/timeout)."
+    },
+    {
+      "parameters": {
+        "amount": 6
+      },
+      "id": "pilot-debounce-wait",
+      "name": "Debounce wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -960,
+        368
+      ],
+      "webhookId": "a68f4a8f-8a66-4a99-bb27-1a020e606276",
+      "notes": "Gives a patient who splits a thought across several texts time to finish before we process any of them. Mirrors WF-A."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_inbound_batch",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_message_id\": \"{{ $('Webhook (pilot test)').item.json.body.message_id }}\" }",
+        "options": {}
+      },
+      "id": "pilot-inbound-batch",
+      "name": "agent_inbound_batch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -736,
+        368
+      ],
+      "notes": "Returns {proceed, conversation_id, joined_body}. proceed=false = superseded by a newer message; this execution stops."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.proceed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-proceed",
+      "name": "Proceed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = ($('agent_inbound_batch').item.json.joined_body || '').trim();\nconst conv = $('agent_inbound_batch').item.json.conversation_id;\nconst tokens = body.toUpperCase().split(/[^A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ]+/).filter(Boolean);\nconst STOP  = ['STOP','PARAR','PARE','SAIR','REMOVER','CHEGA'];\nconst START = ['START','ATIVAR','SUBSCREVER','RETOMAR','INICIAR'];\nlet action = 'continue';\nif (tokens.some(t => STOP.includes(t))) action = 'opt_out';\nelse if (tokens.some(t => START.includes(t))) action = 'opt_in';\nreturn { json: { action, conversation_id: conv } };"
+      },
+      "id": "pilot-check-optout",
+      "name": "Check opt-out",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -288,
+        368
+      ],
+      "notes": "Deterministic, never LLM. Mirrors WF-A exactly."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "continue",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-continue",
+      "name": "Continue?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const a = $json.action;\nconst conv = $json.conversation_id;\nif (a === 'opt_out') return { json: { conversation_id: conv, rpc: 'patient_opt_out', message: 'Registámos o seu pedido. Não voltará a receber mensagens automáticas desta clínica. Responda START para reativar.' } };\nreturn { json: { conversation_id: conv, rpc: 'patient_opt_in', message: 'Subscrição reativada. Voltará a receber as nossas mensagens. Obrigado.' } };"
+      },
+      "id": "pilot-opt-route",
+      "name": "Opt route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/{{ $json.rpc }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "pilot-call-opt-rpc",
+      "name": "Call opt RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        384,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Opt route').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($('Opt route').item.json.message) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "pilot-send-opt-confirm",
+      "name": "Send opt confirm",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1264,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $('Call opt RPC').item.json.advance_cascade }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pilot-opt-advance",
+      "name": "Opt advance?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2224,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.II_CASCADE_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-webhook-secret",
+              "value": "={{ $env.II_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"type\": \"slot_cancelled\",\n  \"slot_id\": \"{{ $('Call opt RPC').item.json.slot_id }}\"\n}",
+        "options": {}
+      },
+      "id": "pilot-opt-repost",
+      "name": "Opt re-post to WF-B",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2448,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Regista que o paciente ACEITA claramente o que lhe foi oferecido nesta conversa: numa conversa slot_cascade aceita a vaga oferecida; numa conversa confirmation confirma que MANTEM a marcacao de amanha. Nao precisa de parametros alem da conversa. SO chame com uma aceitacao/confirmacao clara. Se a resposta for ambigua, uma pergunta, ou um pedido diferente, NAO chame — esclareca primeiro.",
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/offer_accept",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_conversation_id",
+              "value": "={{ $('Build agent prompt').item.json.conversation_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f324a155-dae0-4ee5-a216-ba572941a87d",
+      "name": "offer_accept",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1664,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Regista que o paciente RECUSA claramente o que lhe foi oferecido nesta conversa: numa conversa slot_cascade recusa a vaga oferecida; numa conversa confirmation diz que NAO vai a marcacao (liberta a vaga). SO chame com uma recusa clara. Se ambiguo, NAO chame — esclareca primeiro.",
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/offer_decline",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_conversation_id",
+              "value": "={{ $('Build agent prompt').item.json.conversation_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bcd82206-5c19-476d-aa79-0b83b7262b23",
+      "name": "offer_decline",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1792,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Trata um pedido de cancelamento da marcacao do paciente (fora de uma conversa confirmation — nessa use offer_decline). Chame-a sempre que ele pedir para cancelar. Na PRIMEIRA vez apenas regista o pedido e devolve status='nudge': nesse caso sugira remarcar em vez de cancelar, nunca confirme um cancelamento. So se o paciente insistir claramente na mensagem seguinte e que a volta a chamar, e ai ela cancela mesmo (status='cancelled').",
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/cancel_booking",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_conversation_id",
+              "value": "={{ $('Build agent prompt').item.json.conversation_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d88c28d2-1e9f-4db7-84fc-d74d3302cfb3",
+      "name": "cancel_booking",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1936,
+        352
+      ]
+    },
+    {
+      "name": "Offer guard?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        420,
+        20
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "or",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.conversation_type }}",
+              "rightValue": "slot_cascade",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "leftValue": "={{ $json.conversation_type }}",
+              "rightValue": "confirmation",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "39a549d8-07ba-44f3-b4be-6fb8d02684d4"
+    },
+    {
+      "name": "Classify reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        -60
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $json;\nlet raw = '';\ntry { raw = ($('agent_inbound_batch').item.json.joined_body) || ''; } catch(e){ raw=''; }\nif (!raw) {\n  const msgs = (ctx.messages || []).filter(m => (m.sender_type||m.direction) === 'patient');\n  raw = (msgs.length ? (msgs[msgs.length-1].body || '') : '');\n}\nraw = (raw || '').toString();\nconst norm = raw.toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'');\nconst hasQ = /\\?/.test(raw);\nconst uncertain = /\\b(nao sei|talvez|depende|nao tenho a certeza|logo vejo|se possivel|como assim|mas)\\b/.test(norm);\n// A cancel/reschedule/booking request is NOT an accept or decline of THIS offer.\n// Defer any such intent to the LLM (which has the cancel/reschedule tools).\nconst intent = /\\b(cancelar|desmarcar|remarcar|remarcacao|marcar|outro dia|outra data|outro horario|noutro dia|mudar|trocar de dia|trocar de medico|trocar de hora)\\b/.test(norm);\nconst acc = /\\b(sim|aceito|aceite|aceitar|confirmo|confirmado|confirmar|combinado|perfeito|otimo|ok|okay|claro|pode ser|por mim|tudo bem|esta bem|ta bem|fica bem|pode marcar|mais cedo)\\b/.test(norm);\nconst dec = /\\b(nao|nem|negativo|mantenho|prefiro nao|nao quero|nao posso|nao da|nao consigo|deixa estar|melhor nao|fico com)\\b/.test(norm);\nlet decision = 'unclear';\nif (!hasQ && !uncertain && !intent) {\n  if (acc && !dec) decision = 'accept';\n  else if (dec && !acc) decision = 'decline';\n}\nreturn { json: { ...ctx, decision, _reply_raw: raw } };"
+      },
+      "id": "1c1124dd-2b50-41ad-918b-ccef07960f48"
+    },
+    {
+      "name": "Route accept?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        840,
+        -60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "accept",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "913e7116-d163-413b-aa23-e1a1a9b4f307"
+    },
+    {
+      "name": "Route decline?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "decline",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "09cb0f17-4b64-4ab4-9467-c1beeec874ce"
+    },
+    {
+      "name": "Call offer_accept",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        -180
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/offer_accept",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "43bfbcf6-078a-4df0-862c-cf4781f0c5c7"
+    },
+    {
+      "name": "Call offer_decline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1240,
+        60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/offer_decline",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "28108661-ef2d-4e05-9808-48b8d0e62431"
+    },
+    {
+      "name": "Build accept ack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        -180
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst res = $json;\nconst ctx = $('Classify reply').item.json;\nconst zone = 'Europe/Lisbon';\nconst fmt = (iso) => { try { return DateTime.fromISO(iso, { setZone: true }).setZone(zone).toFormat(\"dd/MM 'às' HH:mm\"); } catch(e){ return iso; } };\nconst nm = (ctx.patient && ctx.patient.name && !/^Novo contacto /.test(ctx.patient.name)) ? ctx.patient.name : '';\nconst greet = nm ? (nm + ', ') : '';\nconst rs = ctx.related_slot || {};\nconst when = rs.start_time ? fmt(rs.start_time) : '';\nconst doc = rs.doctor_name ? (' com ' + rs.doctor_name) : '';\nconst st = res && res.status;\nlet ack;\nif (ctx.conversation_type === 'slot_cascade' && st === 'accepted') {\n  ack = greet + 'está confirmado: a sua consulta passou para ' + when + doc + '. Até já.';\n} else if (ctx.conversation_type === 'confirmation' && st === 'confirmed') {\n  ack = greet + 'obrigado pela confirmação. Fica mantida a sua consulta de ' + when + doc + '.';\n} else if (st === 'stale') {\n  ack = greet + 'essa vaga já não está disponível. A recepção entra em contacto para encontrar outra.';\n} else {\n  ack = greet + 'não consegui concluir agora; a recepção vai verificar e entra em contacto.';\n}\nreturn { json: { conversation_id: ctx.conversation_id, ack } };\n"
+      },
+      "id": "15775243-70c9-42c2-91b9-899c1f238352"
+    },
+    {
+      "name": "Build decline ack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1460,
+        60
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst res = $json;\nconst ctx = $('Classify reply').item.json;\nconst zone = 'Europe/Lisbon';\nconst fmt = (iso) => { try { return DateTime.fromISO(iso, { setZone: true }).setZone(zone).toFormat(\"dd/MM 'às' HH:mm\"); } catch(e){ return iso; } };\nconst nm = (ctx.patient && ctx.patient.name && !/^Novo contacto /.test(ctx.patient.name)) ? ctx.patient.name : '';\nconst greet = nm ? (nm + ', ') : '';\nconst rs = ctx.related_slot || {};\nconst when = rs.start_time ? fmt(rs.start_time) : '';\nlet ack;\nif (ctx.conversation_type === 'slot_cascade') {\n  ack = greet + 'sem problema, mantém a sua marcação atual. Obrigado pela resposta.';\n} else {\n  ack = greet + 'a sua marcação' + (when ? (' de ' + when) : '') + ' foi desmarcada. Se quiser remarcar, é só dizer.';\n}\nreturn { json: { conversation_id: ctx.conversation_id, ack, conversation_type: ctx.conversation_type, slot_id: (res && res.slot_id) || null } };\n"
+      },
+      "id": "98c12310-418d-4637-83ae-8f07a40a71e2"
+    },
+    {
+      "name": "Send guard ack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\", \"p_body\": {{ JSON.stringify($json.ack) }} }",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "e7481c30-9930-4cb3-8838-613f65d1c28a"
+    },
+    {
+      "name": "Cascade decline?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $('Build decline ack').item.json.conversation_type }}",
+              "rightValue": "slot_cascade",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "117f62e1-bf89-486b-978f-252a6adf79f8"
+    },
+    {
+      "name": "Guard re-post to WF-B",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1900,
+        180
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.II_CASCADE_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-webhook-secret",
+              "value": "={{ $env.II_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"type\": \"slot_cancelled\",\n  \"slot_id\": \"{{ $('Call offer_decline').item.json.slot_id }}\"\n}",
+        "options": {}
+      },
+      "id": "87c291fe-90d1-4e84-8c90-69ab0f98b4da"
+    }
+  ],
+  "connections": {
+    "Webhook (pilot test)": {
+      "main": [
+        [
+          {
+            "node": "Verify secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agent_context": {
+      "main": [
+        [
+          {
+            "node": "Offer guard?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build agent prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "agent_send_message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "find_availability_window": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "book_slot": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agent_escalate": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "patient_set_name": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify secret": {
+      "main": [
+        [
+          {
+            "node": "Debounce wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Debounce wait": {
+      "main": [
+        [
+          {
+            "node": "agent_inbound_batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agent_inbound_batch": {
+      "main": [
+        [
+          {
+            "node": "Proceed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proceed?": {
+      "main": [
+        [
+          {
+            "node": "Check opt-out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check opt-out": {
+      "main": [
+        [
+          {
+            "node": "Continue?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue?": {
+      "main": [
+        [
+          {
+            "node": "agent_context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Opt route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Opt route": {
+      "main": [
+        [
+          {
+            "node": "Call opt RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call opt RPC": {
+      "main": [
+        [
+          {
+            "node": "Send opt confirm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send opt confirm": {
+      "main": [
+        [
+          {
+            "node": "Opt advance?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Opt advance?": {
+      "main": [
+        [
+          {
+            "node": "Opt re-post to WF-B",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Chat Model (fallback)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "offer_accept": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "offer_decline": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "cancel_booking": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Offer guard?": {
+      "main": [
+        [
+          {
+            "node": "Classify reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build agent prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify reply": {
+      "main": [
+        [
+          {
+            "node": "Route accept?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route accept?": {
+      "main": [
+        [
+          {
+            "node": "Call offer_accept",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route decline?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route decline?": {
+      "main": [
+        [
+          {
+            "node": "Call offer_decline",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build agent prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call offer_accept": {
+      "main": [
+        [
+          {
+            "node": "Build accept ack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build accept ack": {
+      "main": [
+        [
+          {
+            "node": "Send guard ack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call offer_decline": {
+      "main": [
+        [
+          {
+            "node": "Build decline ack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build decline ack": {
+      "main": [
+        [
+          {
+            "node": "Send guard ack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Cascade decline?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cascade decline?": {
+      "main": [
+        [
+          {
+            "node": "Guard re-post to WF-B",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "binaryMode": "separate"
+  }
+}

@@ -1,0 +1,417 @@
+@import "tailwindcss";
+
+/* ============================================================
+   II ∞ Design System tokens (claude.ai/design · II ∞ Design System).
+   Clinical deep-green brand, teal second voice, surfaces to white.
+   Light is the primary theme (bare :root); dark redefines the
+   semantic tokens only. The raw palette is theme-independent.
+   ============================================================ */
+:root {
+  /* ---- raw palette (theme-independent) ---- */
+  /* green — brand, primary action, the rail, booked appointments */
+  --green-50: #eef6f2; --green-100: #dcede5; --green-200: #b8dbcb;
+  --green-300: #8bc4ac; --green-400: #57a88a; --green-500: #3a8e6e;
+  --green-600: #2f7d62; --green-700: #256551; --green-800: #1c4f3f;
+  --green-900: #143a2e;
+
+  /* teal — second accent: offers, count pills, focal cards */
+  --teal-50: #eaf5f7; --teal-100: #d3ebef; --teal-200: #a8d8de;
+  --teal-300: #79c1cb; --teal-400: #4faab8; --teal-500: #3c9ca8;
+  --teal-600: #2d818d; --teal-700: #236671;
+
+  /* lime-mint — open slots, "the assistant handled it" */
+  --mint-50: #eef8ed; --mint-100: #dbf0d9; --mint-300: #95d494;
+  --mint-500: #4fb356; --mint-600: #3d9647; --mint-700: #2d7237;
+
+  /* amber — needs a person */
+  --amber-50: #fdf6e7; --amber-100: #faebc8; --amber-200: #f4d99b;
+  --amber-400: #e0a53c; --amber-500: #c98a25; --amber-700: #8c5c14;
+
+  /* clay/rose — missed, now-line, destructive (muted, clinical) */
+  --rose-50: #fdf1ef; --rose-100: #fbe1dd; --rose-200: #f6c6bf;
+  --rose-500: #d4614f; --rose-600: #bd4a39; --rose-700: #8a3527;
+
+  /* ink + field — green-leaning greys; no pure grey, no violet */
+  --ink-900: #16211d; --ink-800: #22322c; --ink-700: #3a4a44;
+  --ink-600: #4d5d57; --ink-500: #63736d; --ink-400: #8f9d97;
+  --ink-300: #bcc7c2; --ink-200: #d8e0dc; --ink-100: #e8eeeb;
+  --ink-50: #f2f6f4;
+  --field: #f1f5f3; --field-raised: #f8fbf9; --white: #ffffff;
+
+  /* dark raws — deep clinical green-black */
+  --night-bg: #101a17; --night-panel: #16241f; --night-card: #1d2f28;
+  --night-raised: #243a32; --night-line: #2e453c;
+
+  /* ---- semantic (light) ---- */
+  --canvas: var(--field);
+  --surface: var(--white);
+  --surface-alt: var(--field-raised);
+  --surface-sunken: var(--ink-50);
+  --line-subtle: var(--ink-100);
+  --line: var(--ink-200);
+  --line-strong: var(--ink-300);
+  --ink: var(--ink-900);
+  --muted: var(--ink-500);
+  --faint: var(--ink-400);
+  --disabled: var(--ink-300);
+
+  /* brand + actions */
+  --brand: var(--green-600);
+  --brand-hover: var(--green-700);
+  --brand-solid: var(--green-600);
+  --brand-solid-hover: var(--green-700);
+  --brand-on: #ffffff;
+  --brand-subtle: var(--green-50);
+  --brand-muted: var(--green-100);
+
+  /* semantic status */
+  --success: var(--green-600); --success-bg: var(--green-50);  --success-fg: var(--green-800);
+  --warning: var(--amber-500); --warning-bg: var(--amber-50);  --warning-fg: var(--amber-700);
+  --danger:  var(--rose-600);  --danger-bg:  var(--rose-50);   --danger-fg:  var(--rose-700);
+  --info:    var(--teal-500);  --info-bg:    var(--teal-50);   --info-fg:    var(--teal-700);
+  --teal:    var(--teal-500);  --teal-bg:    var(--teal-50);   --teal-fg:    var(--teal-700);
+
+  /* the rail — a green-filled surface in both themes */
+  --sidebar: var(--green-600);
+  --sidebar-fg: rgb(255 255 255 / 0.92);
+  --sidebar-muted: rgb(255 255 255 / 0.62);
+
+  /* metric accents — one per counter (dashboard) */
+  --metric-appointments: var(--green-600);
+  --metric-open-slots: var(--mint-600);
+  --metric-escalations: var(--amber-500);
+  --metric-waiting-list: var(--teal-500);
+
+  /* Slot status (agenda). The governing rule: a REAL APPOINTMENT is a solid,
+     filled object; an OPEN SLOT is a hollow gap. Confirmed is a saturated
+     green fill (the day's backbone), booked/pending/offered are firmly tinted
+     with saturated borders, and `available` has NO fill at all — just a quiet
+     continuous outline, so a day full of vagas reads as empty space with the
+     real appointments standing out of it. */
+  --slot-booked-bg: var(--green-100); --slot-booked-border: var(--green-300); --slot-booked-text: var(--green-900); --slot-booked-dot: var(--green-400);
+  --slot-confirmed-bg: var(--green-600); --slot-confirmed-border: var(--green-700); --slot-confirmed-text: #ffffff; --slot-confirmed-dot: var(--green-600);
+  --slot-pending-bg: var(--amber-100); --slot-pending-border: var(--amber-400); --slot-pending-text: var(--amber-700); --slot-pending-dot: var(--amber-400);
+  --slot-offered-bg: var(--teal-100); --slot-offered-border: var(--teal-400); --slot-offered-text: var(--teal-700); --slot-offered-dot: var(--teal-400);
+  --slot-available-bg: transparent; --slot-available-border: var(--ink-200); --slot-available-text: var(--ink-500); --slot-available-dot: var(--ink-300);
+  --slot-completed-bg: var(--ink-50); --slot-completed-border: var(--ink-200); --slot-completed-text: var(--ink-500); --slot-completed-dot: var(--ink-300);
+  --slot-noshow-bg: var(--rose-100); --slot-noshow-border: var(--rose-500); --slot-noshow-text: var(--rose-700); --slot-noshow-dot: var(--rose-500);
+  --slot-cancelled-bg: var(--ink-50); --slot-cancelled-border: var(--ink-200); --slot-cancelled-text: var(--ink-400); --slot-cancelled-dot: var(--ink-300);
+  --now-line: var(--rose-500);
+
+  /* elevation */
+  --shadow-xs: 0 0 0 1px var(--line);
+  --shadow-sm: 0 0 0 1px var(--line), 0 1px 2px rgb(20 58 46 / 0.06);
+  --shadow-md: 0 1px 3px rgb(20 58 46 / 0.09), 0 1px 2px -1px rgb(20 58 46 / 0.06);
+  --shadow-lg: 0 12px 32px rgb(20 58 46 / 0.14), 0 0 0 1px var(--line-subtle);
+  --shadow-green: 0 1px 2px rgb(20 58 46 / 0.16), 0 10px 24px -14px rgb(20 58 46 / 0.55);
+  --shadow-teal: 0 1px 2px rgb(35 102 113 / 0.16), 0 10px 24px -14px rgb(35 102 113 / 0.55);
+  --ring-focus: 0 0 0 3px rgb(87 168 138 / 0.32);
+}
+
+/* ---- semantic (dark) ---- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas: var(--night-bg);
+    --surface: var(--night-panel);
+    --surface-alt: var(--night-card);
+    --surface-sunken: #0d1613;
+    --line-subtle: #273b34;
+    --line: var(--night-line);
+    --line-strong: #3a5449;
+    --ink: #eef4f1;
+    --muted: #9aaaa4;
+    --faint: #7b8b85;
+    --disabled: #55665f;
+
+    --brand: var(--green-500);
+    --brand-hover: var(--green-400);
+    --brand-solid: var(--green-600);
+    --brand-solid-hover: var(--green-500);
+    --brand-on: #ffffff;
+    --brand-subtle: #183a2e;
+    --brand-muted: #1f4a3a;
+
+    --success: var(--green-400); --success-bg: rgb(58 142 110 / 0.18); --success-fg: #bfe3d3;
+    --warning: var(--amber-400); --warning-bg: rgb(224 165 60 / 0.16); --warning-fg: #f0d49a;
+    --danger:  var(--rose-500);  --danger-bg:  rgb(212 97 79 / 0.18);  --danger-fg:  #f3bcb1;
+    --info:    var(--teal-400);  --info-bg:    rgb(60 156 168 / 0.18); --info-fg:    #a9dde4;
+    --teal:    var(--teal-400);  --teal-bg:    rgb(60 156 168 / 0.18); --teal-fg:    #a9dde4;
+
+    --sidebar: var(--green-800);
+    --sidebar-fg: rgb(255 255 255 / 0.9);
+    --sidebar-muted: rgb(255 255 255 / 0.58);
+
+    --metric-appointments: var(--green-500);
+    --metric-open-slots: var(--mint-500);
+    --metric-escalations: var(--amber-400);
+    --metric-waiting-list: var(--teal-400);
+
+    /* slot status (agenda) — dark. Same rule: appointments solid, vagas hollow. */
+    --slot-booked-bg: rgb(58 142 110 / 0.32); --slot-booked-border: rgb(87 168 138 / 0.62); --slot-booked-text: #d3ece0; --slot-booked-dot: var(--green-400);
+    --slot-confirmed-bg: var(--green-600); --slot-confirmed-border: var(--green-500); --slot-confirmed-text: #ffffff; --slot-confirmed-dot: var(--green-400);
+    --slot-pending-bg: rgb(224 165 60 / 0.24); --slot-pending-border: rgb(224 165 60 / 0.6); --slot-pending-text: #f3dcac; --slot-pending-dot: var(--amber-400);
+    --slot-offered-bg: rgb(60 156 168 / 0.26); --slot-offered-border: rgb(79 170 184 / 0.65); --slot-offered-text: #b3e2e8; --slot-offered-dot: var(--teal-400);
+    --slot-available-bg: transparent; --slot-available-border: rgb(255 255 255 / 0.15); --slot-available-text: #90a09a; --slot-available-dot: var(--ink-600);
+    --slot-completed-bg: rgb(255 255 255 / 0.06); --slot-completed-border: rgb(255 255 255 / 0.14); --slot-completed-text: #9aaaa4; --slot-completed-dot: var(--ink-500);
+    --slot-noshow-bg: rgb(212 97 79 / 0.28); --slot-noshow-border: rgb(212 97 79 / 0.62); --slot-noshow-text: #f3bcb1; --slot-noshow-dot: var(--rose-500);
+    --slot-cancelled-bg: rgb(255 255 255 / 0.04); --slot-cancelled-border: rgb(255 255 255 / 0.12); --slot-cancelled-text: #7b8b85; --slot-cancelled-dot: var(--ink-600);
+    --now-line: var(--rose-500);
+
+    --shadow-xs: 0 0 0 1px var(--line);
+    --shadow-sm: 0 0 0 1px var(--line), 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-md: 0 1px 3px rgb(0 0 0 / 0.5), 0 1px 2px -1px rgb(0 0 0 / 0.4);
+    --shadow-lg: 0 16px 48px rgb(0 0 0 / 0.6), 0 0 0 1px var(--line-subtle);
+    --shadow-green: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 28px -20px rgb(0 0 0 / 0.85);
+    --shadow-teal: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 28px -20px rgb(0 0 0 / 0.85);
+    --ring-focus: 0 0 0 3px rgb(87 168 138 / 0.34);
+  }
+}
+
+/* Explicit dark toggle — wins on any OS (the no-flash script sets data-theme). */
+:root[data-theme="dark"] {
+  --canvas: var(--night-bg);
+  --surface: var(--night-panel);
+  --surface-alt: var(--night-card);
+  --surface-sunken: #0d1613;
+  --line-subtle: #273b34;
+  --line: var(--night-line);
+  --line-strong: #3a5449;
+  --ink: #eef4f1;
+  --muted: #9aaaa4;
+  --faint: #7b8b85;
+  --disabled: #55665f;
+
+  --brand: var(--green-500);
+  --brand-hover: var(--green-400);
+  --brand-solid: var(--green-600);
+  --brand-solid-hover: var(--green-500);
+  --brand-on: #ffffff;
+  --brand-subtle: #183a2e;
+  --brand-muted: #1f4a3a;
+
+  --success: var(--green-400); --success-bg: rgb(58 142 110 / 0.18); --success-fg: #bfe3d3;
+  --warning: var(--amber-400); --warning-bg: rgb(224 165 60 / 0.16); --warning-fg: #f0d49a;
+  --danger:  var(--rose-500);  --danger-bg:  rgb(212 97 79 / 0.18);  --danger-fg:  #f3bcb1;
+  --info:    var(--teal-400);  --info-bg:    rgb(60 156 168 / 0.18); --info-fg:    #a9dde4;
+  --teal:    var(--teal-400);  --teal-bg:    rgb(60 156 168 / 0.18); --teal-fg:    #a9dde4;
+
+  --sidebar: var(--green-800);
+  --sidebar-fg: rgb(255 255 255 / 0.9);
+  --sidebar-muted: rgb(255 255 255 / 0.58);
+
+  --metric-appointments: var(--green-500);
+  --metric-open-slots: var(--mint-500);
+  --metric-escalations: var(--amber-400);
+  --metric-waiting-list: var(--teal-400);
+
+  --shadow-xs: 0 0 0 1px var(--line);
+  --shadow-sm: 0 0 0 1px var(--line), 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 1px 3px rgb(0 0 0 / 0.5), 0 1px 2px -1px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 16px 48px rgb(0 0 0 / 0.6), 0 0 0 1px var(--line-subtle);
+  --shadow-green: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 28px -20px rgb(0 0 0 / 0.85);
+  --shadow-teal: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 28px -20px rgb(0 0 0 / 0.85);
+  --ring-focus: 0 0 0 3px rgb(87 168 138 / 0.34);
+}
+
+/* An explicit light choice must also beat a dark OS. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* Map tokens to Tailwind utilities (bg-canvas, text-ink, border-line, …). */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-alt: var(--surface-alt);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-line: var(--line);
+  --color-line-subtle: var(--line-subtle);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-disabled: var(--disabled);
+
+  --color-green-50: var(--green-50);
+  --color-green-100: var(--green-100);
+  --color-green-200: var(--green-200);
+  --color-green-300: var(--green-300);
+  --color-green-400: var(--green-400);
+  --color-green-500: var(--green-500);
+  --color-green-600: var(--green-600);
+  --color-green-700: var(--green-700);
+  --color-green-800: var(--green-800);
+  --color-green-900: var(--green-900);
+
+  --color-teal-50: var(--teal-50);
+  --color-teal-100: var(--teal-100);
+  --color-teal-200: var(--teal-200);
+  --color-teal-300: var(--teal-300);
+  --color-teal-400: var(--teal-400);
+  --color-teal-500: var(--teal-500);
+  --color-teal-600: var(--teal-600);
+  --color-teal-700: var(--teal-700);
+
+  --color-mint-50: var(--mint-50);
+  --color-mint-100: var(--mint-100);
+  --color-mint-300: var(--mint-300);
+  --color-mint-500: var(--mint-500);
+  --color-mint-600: var(--mint-600);
+  --color-mint-700: var(--mint-700);
+
+  --color-amber-50: var(--amber-50);
+  --color-amber-100: var(--amber-100);
+  --color-amber-200: var(--amber-200);
+  --color-amber-400: var(--amber-400);
+  --color-amber-500: var(--amber-500);
+  --color-amber-700: var(--amber-700);
+
+  --color-rose-50: var(--rose-50);
+  --color-rose-100: var(--rose-100);
+  --color-rose-200: var(--rose-200);
+  --color-rose-500: var(--rose-500);
+  --color-rose-600: var(--rose-600);
+  --color-rose-700: var(--rose-700);
+
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-solid: var(--brand-solid);
+  --color-brand-solid-hover: var(--brand-solid-hover);
+  --color-brand-on: var(--brand-on);
+  --color-brand-subtle: var(--brand-subtle);
+  --color-brand-muted: var(--brand-muted);
+
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-success-fg: var(--success-fg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-fg: var(--warning-fg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-fg: var(--danger-fg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-info-fg: var(--info-fg);
+  --color-teal: var(--teal);
+  --color-teal-bg: var(--teal-bg);
+  --color-teal-fg: var(--teal-fg);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-fg: var(--sidebar-fg);
+  --color-sidebar-muted: var(--sidebar-muted);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), Inter, system-ui, sans-serif;
+}
+
+/* Agenda slot: a slow pulse while a cascade offer is out, hover lift. */
+@keyframes ii-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.ii-pulse {
+  animation: ii-pulse 2.4s ease-in-out infinite;
+}
+.ii-slot {
+  transition: box-shadow 0.16s ease;
+}
+.ii-slot:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* ============================================================
+   Motion system — hero + entrance choreography.
+   Continuous animations are gated behind prefers-reduced-motion.
+   ============================================================ */
+
+/* Entrance: fade + rise. Applied with a per-element --d delay for stagger. */
+@keyframes ii-rise {
+  from { opacity: 0; transform: translateY(22px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.ii-rise {
+  /* `backwards` (not `both`): hold the start frame during the delay, then let
+     the element's own styles take over — so a :hover transform on the SAME
+     element still works after the entrance settles. */
+  animation: ii-rise 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+  animation-delay: var(--d, 0s);
+}
+
+/* Agenda slots ease in with a small rise + settle. */
+@keyframes ii-slot-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.ii-slot-in {
+  animation: ii-slot-in 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+  animation-delay: var(--d, 0s);
+}
+
+/* The "now" marker breathes a soft radar ring. */
+@keyframes ii-now-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--now-line) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--now-line) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--now-line) 0%, transparent); }
+}
+.ii-now-dot { animation: ii-now-pulse 2.4s ease-out infinite; }
+
+/* The 3D mark: a slow buoyant float + tilt, layered under the mouse parallax. */
+@keyframes ii-float {
+  0%, 100% { transform: translateY(0) rotate(-2.2deg); }
+  50%      { transform: translateY(-18px) rotate(2.2deg); }
+}
+.ii-float { animation: ii-float 6.5s ease-in-out infinite; will-change: transform; }
+
+/* Glow puck behind the mark. */
+@keyframes ii-glow {
+  0%, 100% { opacity: 0.42; transform: translate(-50%, -50%) scale(1); }
+  50%      { opacity: 0.82; transform: translate(-50%, -50%) scale(1.14); }
+}
+.ii-glow { animation: ii-glow 5s ease-in-out infinite; will-change: opacity, transform; }
+
+/* Aurora blobs drifting across the hero band. */
+@keyframes ii-aurora-a {
+  0%   { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(9%, 7%) scale(1.16); }
+  66%  { transform: translate(-7%, 11%) scale(0.94); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+@keyframes ii-aurora-b {
+  0%   { transform: translate(0, 0) scale(1.05); }
+  50%  { transform: translate(-11%, -9%) scale(1.24); }
+  100% { transform: translate(0, 0) scale(1.05); }
+}
+.ii-aurora-a { animation: ii-aurora-a 19s ease-in-out infinite; will-change: transform; }
+.ii-aurora-b { animation: ii-aurora-b 24s ease-in-out infinite; will-change: transform; }
+
+/* Diagonal light sheen sweeping across the band. */
+@keyframes ii-sheen {
+  0%      { transform: translateX(-130%) skewX(-18deg); opacity: 0; }
+  12%     { opacity: 0.5; }
+  45%     { opacity: 0; }
+  100%    { transform: translateX(340%) skewX(-18deg); opacity: 0; }
+}
+.ii-sheen { animation: ii-sheen 8.5s ease-in-out infinite; will-change: transform, opacity; }
+
+/* The parallax carrier — smooth return when the pointer leaves. */
+.ii-parallax {
+  transform: perspective(820px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg))
+    translate3d(var(--tx, 0px), var(--ty, 0px), 0);
+  transition: transform 0.3s cubic-bezier(0.22, 0.61, 0.36, 1);
+  transform-style: preserve-3d;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ii-rise, .ii-float, .ii-glow, .ii-aurora-a, .ii-aurora-b, .ii-sheen,
+  .ii-slot-in, .ii-now-dot {
+    animation: none !important;
+  }
+  .ii-parallax { transition: none; }
+}

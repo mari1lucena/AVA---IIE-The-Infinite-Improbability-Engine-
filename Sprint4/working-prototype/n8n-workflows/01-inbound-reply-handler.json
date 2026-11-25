@@ -1,0 +1,3027 @@
+{
+  "name": "II - Inbound Reply Handler (WF-A)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ii-inbound-reply",
+        "options": {}
+      },
+      "id": "f462306d-44e2-405e-a84a-2c7cc489cb45",
+      "name": "Webhook (patient reply)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1248,
+        208
+      ],
+      "webhookId": "ii-inbound-reply",
+      "notes": "Fired by trg_notify_n8n_inbound on every patient message INSERT. Payload: { type:'inbound_reply', message_id, conversation_id, body, channel, sent_at }. After activating, set private.app_config.n8n_inbound_webhook_url to this node's Production URL."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.headers['x-webhook-secret'] }}",
+              "rightValue": "={{ $env.II_WEBHOOK_SECRET }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1869802-b73f-49a4-b988-10f643ab08ec",
+      "name": "Verify secret",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1024,
+        208
+      ],
+      "notes": "II_WEBHOOK_SECRET = private.app_config.n8n_webhook_secret. False branch is a dead end (bad/forged request)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_context",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "d8ff9c4a-3e94-4a60-9319-8b3ca9eff99d",
+      "name": "agent_context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -128,
+        208
+      ],
+      "notes": "Returns conversation_type + clinic_name + patient + messages[]. conversation_type is what lets us route ACCEPT/DECLINE to the right slot RPC below."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.1-8b-instant\",\n  \"temperature\": 0,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"Classifique a resposta do paciente a uma oferta/confirmação de marcação numa categoria e detete o idioma. Perceba linguagem natural e livre, não apenas palavras-chave sim/não.\\nCategorias: ACCEPT, DECLINE, QUESTION, FRUSTRATED, INSURANCE, UNCLEAR.\\nACCEPT = qualquer concordância ou interesse: \\\"sim\\\", \\\"claro\\\", \\\"pode ser\\\", \\\"por mim ok\\\", \\\"aceito\\\", \\\"quero\\\", \\\"combinado\\\", \\\"está bem\\\", \\\"perfeito\\\", \\\"yes\\\", \\\"sure\\\", \\\"that works\\\".\\nDECLINE = qualquer recusa ou indisponibilidade: \\\"não\\\", \\\"não posso\\\", \\\"não dá\\\", \\\"infelizmente não\\\", \\\"prefiro ficar\\\", \\\"noutro dia\\\", \\\"no\\\", \\\"can't make it\\\".\\nQUESTION = inicia um novo pedido ou pergunta algo que precisa de um humano (ex.: \\\"a que horas exatamente?\\\", marcar outro dia).\\nFRUSTRATED = insultos, palavrões ou irritação.\\nINSURANCE = seguro/subsistema/ADSE/pagamento/preço/co-pagamento.\\nUNCLEAR = genuinamente ambíguo ou não relacionado.\\nDevolva JSON estrito: {\\\"category\\\":\\\"...\\\",\\\"lang\\\":\\\"pt|en\\\"}. Sem mais texto.\" },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($('agent_inbound_batch').item.json.joined_body) }} }\n  ]\n}",
+        "options": {}
+      },
+      "id": "a9106019-0a34-46e3-bec3-8df167993a57",
+      "name": "Classify intent (Groq 8B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        544,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Decide what to DO with this reply, using both the intent category and the\n// conversation_type. ACCEPT/DECLINE only mean something inside a cascade or a\n// confirmation flow -> map them to the right slot RPC. Everything ambiguous or\n// human-worthy falls through to escalate / generic AI reply.\nconst parsed = JSON.parse($('Classify intent (Groq 8B)').item.json.choices[0].message.content);\nlet category = (parsed.category || 'UNCLEAR').toUpperCase();\n// Small classifiers can hallucinate FRUSTRATED on ordinary short replies (e.g.\n// a bare name during placeholder-name capture -> reproduced live on \"miguel\n// snatos\"). Require keyword corroboration before trusting the label; the\n// documented design is hybrid (keyword shortcut + AI), not AI-only. Without\n// evidence, fall through as UNCLEAR so the richer-context assist branch\n// decides instead of escalating blind.\nif (category === 'FRUSTRATED') {\n  const raw = ($('agent_inbound_batch').item.json.joined_body || '').toLowerCase();\n  const hasEvidence = /porra|merda|caralho|foda-se|burro|idiota|estúpid|raios|inútil|lixo|ridículo|chatead|irritad|fart[oa]|cansad[oa] disto|p[ée]ssimo|horr[íi]vel|que se lixe|!!|\\?!/.test(raw);\n  if (!hasEvidence) category = 'UNCLEAR';\n}\nconst lang = parsed.lang || 'pt';\nconst ctx = $('agent_context').item.json;\nconst convType = ctx.conversation_type;\nconst conversation_id = ctx.conversation_id;\n\n// Booking-choice short-circuit: if we previously offered slots, this reply is a choice.\nconst offered_ids = ctx.offered_slot_ids || [];\nif (offered_ids && offered_ids.length) {\n  return { json: { category, lang, action: 'booking_choice', escalate_category: null, rpc: null, conversation_id } };\n}\n\n// A pending cancel-or-reschedule nudge takes the next reply as its answer.\nif (ctx.cancel_pending) {\n  return { json: { category, lang, action: 'cancel_choice', escalate_category: null, rpc: null, conversation_id } };\n}\n\nconst escalateMap = { FRUSTRATED: 'complaint', INSURANCE: 'insurance_issue' };\nlet action = 'reply';          // reply = generic AI answer (default)\nlet escalate_category = null;  // set when action = escalate\nlet rpc = null;                // slot RPC to call when action = rpc\n\nif (category in escalateMap) {\n  action = 'escalate';\n  escalate_category = escalateMap[category];\n} else if (convType === 'slot_cascade') {\n  if (category === 'ACCEPT')  { action = 'rpc'; rpc = 'cascade_respond_accept'; }\n  else if (category === 'DECLINE') { action = 'rpc'; rpc = 'cascade_respond_decline'; }\n  // UNCLEAR on a cascade -> fall through to a generic AI nudge (SIM/NÃO?).\n} else if (convType === 'confirmation') {\n  if (category === 'ACCEPT')  { action = 'rpc'; rpc = 'confirmation_confirm'; }\n  else if (category === 'DECLINE') { action = 'rpc'; rpc = 'confirmation_decline'; }\n}\n\nreturn { json: { category, lang, action, escalate_category, rpc, conversation_id } };"
+      },
+      "id": "2af66119-8d1a-4d2b-9dd3-c338f24a025e",
+      "name": "Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        208
+      ],
+      "notes": "The brain of WF-A. slot_cascade + ACCEPT -> cascade_respond_accept, + DECLINE -> cascade_respond_decline (advances to next candidate). confirmation + ACCEPT -> confirmation_confirm, + DECLINE -> confirmation_decline (frees slot -> DB trigger auto-starts a cascade)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "escalate",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "df46a287-57de-4c20-abcb-8a823c8440c0",
+      "name": "Escalate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_escalate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_category\": \"{{ $json.escalate_category }}\",\n  \"p_reason\": \"Escalado pelo agente: {{ $json.category }}\",\n  \"p_priority\": \"{{ $json.category === 'QUESTION' ? 'normal' : 'high' }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "0d066598-d2d5-46d4-b779-3f509246af53",
+      "name": "agent_escalate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        -32
+      ],
+      "notes": "Hands off to a human -> lands in the staff escalation_queue. No SMS is sent; staff take over the thread."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "rpc",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "3450a306-2fd4-484f-9aae-f5cf60e35880",
+      "name": "Slot action?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        160
+      ],
+      "notes": "True -> a cascade/confirmation ACCEPT or DECLINE that mutates a slot. False -> generic AI reply."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/{{ $json.rpc }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "1823aa85-d52f-48b2-90c4-df0fed5a0088",
+      "name": "Call slot RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2784,
+        208
+      ],
+      "notes": "One node for all four RPCs (URL is {{ $json.rpc }}). All take a single p_conversation_id and each resolves the conversation. cascade_respond_decline returns the still-free slot_id so we can advance the cascade."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Compose a short, deterministic acknowledgement for the person who just\n// replied (no Groq call needed — these are fixed outcomes), and decide whether\n// we must advance the cascade to the next candidate.\n//   - cascade DECLINE: ack + advance (re-post the freed slot to WF-B).\n//   - cascade ACCEPT / confirmation ACCEPT / confirmation DECLINE: ack only.\n//     (an accepted cascade or a declined confirmation flips a slot's status,\n//      which the DB trigger turns into a fresh cascade automatically.)\nconst route = $('Route').item.json;\nconst res = $json;                 // RPC result envelope\nconst en = (route.lang || 'pt') === 'en';\nconst rpc = route.rpc;\nconst status = res && res.status;\n\nlet ack = '';\nlet advance_cascade = false;\nlet slot_id = null;\n\nif (rpc === 'cascade_respond_accept') {\n  ack = status === 'accepted'\n    ? (en ? 'Perfect! Your appointment has been rescheduled. See you soon.' : 'Perfeito! A sua consulta foi remarcada. Até breve.')\n    : (en ? 'That slot has already been taken — thank you anyway.' : 'Essa vaga já foi preenchida, obrigado à mesma.');\n} else if (rpc === 'cascade_respond_decline') {\n  ack = en ? 'No problem, thank you for letting us know.' : 'Sem problema, obrigado pela resposta.';\n  advance_cascade = true;\n  slot_id = res && res.slot_id;\n} else if (rpc === 'confirmation_confirm') {\n  ack = en ? 'Thank you, your appointment is confirmed.' : 'Obrigado, a sua consulta está confirmada.';\n} else if (rpc === 'confirmation_decline') {\n  ack = en ? 'Thank you for letting us know. We will free up the slot.' : 'Obrigado por avisar. Vamos libertar o horário.';\n}\n\nreturn { json: { conversation_id: route.conversation_id, ack_body: ack, advance_cascade, slot_id } };"
+      },
+      "id": "35947df6-7f8b-476f-b1cb-de7c61bdc31d",
+      "name": "After RPC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3008,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.ack_body) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "3eb6f3e6-42ca-4919-9c22-19bbe6c40adb",
+      "name": "Send acknowledgement",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3232,
+        208
+      ],
+      "notes": "Closes the loop with the patient who replied (a reply, not agent-initiated -> no opt-out line needed). Then, for a declined cascade, we advance."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $('After RPC').first().json.advance_cascade }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "80014bb8-46b1-48d4-83d1-c674a102a0dc",
+      "name": "Advance cascade?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3456,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.II_CASCADE_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-webhook-secret",
+              "value": "={{ $env.II_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"type\": \"slot_cancelled\",\n  \"slot_id\": \"{{ $('After RPC').first().json.slot_id }}\"\n}",
+        "options": {}
+      },
+      "id": "8f23c3cc-063b-4d69-9c57-846873d1e603",
+      "name": "Re-post to WF-B",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3680,
+        208
+      ],
+      "notes": "A declined cascade offer leaves the slot still 'cancelled' (no DB trigger fires), so we actively re-post it to WF-B's cascade webhook to offer the NEXT candidate. II_CASCADE_WEBHOOK_URL = WF-B's Production URL (same value as private.app_config.n8n_cascade_webhook_url)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Route assist').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($('Route assist').item.json.message) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "fd5256e3-c097-4d08-a984-cb12339d1cb7",
+      "name": "Send reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4128,
+        -432
+      ],
+      "notes": "Posts the generic AI answer with the service_role key -> lands in the /sms thread and staff /conversations console. Won't re-trigger n8n (agent messages don't fire the inbound trigger)."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $('agent_context').item.json;\nconst route = $('Route').item.json;\nconst clinic = ctx.clinic_name || 'a clínica';\nconst convType = ctx.conversation_type || '';\nconst patient = (ctx.patient && ctx.patient.name) || '';\nconst firstName = (patient && !/^Novo contacto/.test(patient)) ? patient.split(' ')[0] : '';\nconst messages = ctx.messages || [];\nconst zone='Europe/Lisbon';\nconst now = DateTime.now().setZone(zone);\nconst today = now.toFormat('yyyy-MM-dd');\nconst weekday = now.setLocale('pt').toFormat('cccc');\nconst system = 'É rececionista da ' + clinic + ', em Portugal. Hoje é ' + today + ' (' + weekday + '), fuso Europe/Lisbon. O paciente escreveu algo que não é um sim/não claro numa conversa do tipo \"' + convType + '\". '\n  + 'Decida UMA ação e responda em JSON estrito: {\"action\":\"reply\"|\"offer\"|\"escalate\"|\"cancel_request\",\"message\":\"...\",\"reason\":\"...\",\"category\":\"booking_request\"|\"conversation_takeover\",\"date\":\"YYYY-MM-DD\"|null,\"from\":\"HH:MM\"|null,\"to\":\"HH:MM\"|null}.\\n'\n  + '- Se o paciente quer remarcar, marcar, antecipar, adiar ou mudar para outra data/hora E já indicou nesta mensagem (ou numa anterior, ainda por atender) alguma preferência de dia, hora ou período: action=\"offer\" (vamos procurar vagas). \"message\" e \"reason\" vazios. Preencha date/from/to com o que ele indicou:\\n'\n  + '   • dia (\"terça dia 18\", \"amanhã\", \"para a semana\") -> date (resolva para uma data real YYYY-MM-DD);\\n'\n  + '   • hora aproximada (\"por volta das 16h\", \"às 15h\") -> from=essa hora (HH:MM), to=null;\\n'\n  + '   • período: \"de manhã\" -> from=08:00,to=13:00; \"à tarde\" -> from=13:00,to=19:00; \"ao fim do dia\"/\"fim da tarde\" -> from=16:00,to=19:00; \"hora de almoço\" -> from=12:00,to=14:00;\\n'\n  + '- Se o paciente quer marcar/remarcar mas AINDA NÃO indicou nenhuma preferência de dia, hora ou período (ex.: \"queria marcar uma consulta\", \"gostava de remarcar\"): action=\"reply\"; \"message\" pergunta, de forma simpática e breve, que dia e que altura do dia lhe dá mais jeito — NÃO sugira nenhum horário nem vaga concreta, apenas pergunte; date/from/to a null.\\n'\n  + '- Se o paciente disser que quer cancelar, desmarcar ou anular a consulta e NÃO pedir nem aceitar remarcar para outra data: action=\"cancel_request\"; \"message\" e \"reason\" vazios; date/from/to a null. Se a mesma mensagem também mencionar uma data/hora nova ou pedir para remarcar, trate como remarcação (\"offer\"), não como cancelamento.\\n'\n  + '- Pergunta clínica/médica, sintomas, medicação, ou algo incerto que exija um humano: action=\"escalate\", category=\"conversation_takeover\"; \"reason\" resume; \"message\" vazio.\\n'\n  + '- Pergunta simples de logística sobre a marcação (médico, hora, local): action=\"reply\", \"message\" curta e cordial.\\n'\n  + 'Entre \"offer\" e \"escalate\" para remarcações, prefira \"offer\". Nunca dê conselhos médicos nem invente horas. Português europeu formal (\"você\"), ou inglês se o paciente escreveu em inglês. '\n  + (firstName ? ('Trate por \"' + firstName + '\". ') : '')\n  + 'NÃO escreva nada sobre STOP; isso é tratado automaticamente.';\nconst user = 'Conversa até agora: ' + JSON.stringify(messages);\nreturn { json: { conversation_id: route.conversation_id, system_prompt: system, user_prompt: user } };"
+      },
+      "id": "assist-build",
+      "name": "Build assist prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2784,
+        -272
+      ],
+      "notes": "Build assist prompt"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.2,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.user_prompt) }} }\n  ]\n}",
+        "options": {}
+      },
+      "id": "assist-groq",
+      "name": "Assist (Groq 70B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3008,
+        -272
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const parsed = JSON.parse($json.choices[0].message.content);\nconst conv = $('Build assist prompt').item.json.conversation_id;\nlet action = String(parsed.action || 'reply').toLowerCase();\nif (!['reply','offer','escalate','cancel_request'].includes(action)) action = 'reply';\nlet category = String(parsed.category || 'conversation_takeover');\nif (category !== 'booking_request' && category !== 'conversation_takeover') category = 'conversation_takeover';\nlet message = parsed.message || '';\n\n// Continuity of care: default every fresh offer search to the patient's\n// assigned doctor, unless they explicitly named someone else in this\n// message -- deterministic surname match against the real roster (never an\n// LLM guess, per the FRUSTRATED/wrong-doctor lessons learned live today).\nconst ctx = $('agent_context').item.json;\nconst doctors = ctx.doctors || [];\nconst raw = ($('agent_inbound_batch').item.json.joined_body || '').toLowerCase();\nlet requested_doctor_id = null;\nfor (const d of doctors) {\n  const surname = d.name.trim().split(/\\s+/).pop().toLowerCase();\n  if (surname && raw.includes(surname)) { requested_doctor_id = d.id; break; }\n}\nconst primary_doctor_id = (ctx.patient && ctx.patient.primary_doctor_id) || null;\nconst doctor_id = requested_doctor_id || primary_doctor_id || null;\nconst lock_doctor = !!requested_doctor_id;\nconst doctor_source = requested_doctor_id ? 'requested' : (primary_doctor_id ? 'primary' : 'none');\n\nreturn { json: { conversation_id: conv, action, category, message, reason: parsed.reason || 'Pedido do paciente', date: parsed.date || null, from: parsed.from || null, to: parsed.to || null, doctor_id, lock_doctor, doctor_source } };"
+      },
+      "id": "assist-route",
+      "name": "Route assist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3232,
+        -272
+      ],
+      "notes": "Route assist"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "escalate",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "assist-if",
+      "name": "Assist: escalate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3904,
+        -528
+      ],
+      "notes": "Assist: escalate?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_escalate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_category\": \"{{ $json.category }}\",\n  \"p_reason\": {{ JSON.stringify($json.reason) }},\n  \"p_priority\": \"normal\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "assist-escalate",
+      "name": "Assist escalate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4128,
+        -624
+      ],
+      "notes": "Assist escalate"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "offer",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "offer-if",
+      "name": "Offer?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3456,
+        -272
+      ],
+      "notes": "Offer?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/find_availability_window",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Route assist').item.json.conversation_id }}\",\n  \"p_date\": {{ $('Route assist').item.json.date ? JSON.stringify($('Route assist').item.json.date) : 'null' }},\n  \"p_from\": {{ $('Route assist').item.json.from ? JSON.stringify($('Route assist').item.json.from) : 'null' }},\n  \"p_to\": {{ $('Route assist').item.json.to ? JSON.stringify($('Route assist').item.json.to) : 'null' }},\n  \"p_limit\": 3,\n  \"p_doctor_id\": {{ $('Route assist').item.json.doctor_id ? JSON.stringify($('Route assist').item.json.doctor_id) : 'null' }},\n  \"p_lock_doctor\": {{ !!$('Route assist').item.json.lock_doctor }}\n}",
+        "options": {}
+      },
+      "id": "find-avail",
+      "name": "find_availability",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3680,
+        16
+      ],
+      "notes": "find_availability"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const res = $json; // find_availability_window result\nconst ctx = $('agent_context').item.json;\nconst conv = $('Route assist').item.json.conversation_id;\nconst zone='Europe/Lisbon';\nconst fmtTime=(iso)=>DateTime.fromISO(iso).setZone(zone).toFormat('HH:mm');\nconst dayWord=(iso)=>{const d=DateTime.fromISO(iso).setZone(zone).startOf('day');const t=DateTime.now().setZone(zone).startOf('day');const diff=Math.round(d.diff(t,'days').days);return diff===0?'hoje':(diff===1?'amanhã':DateTime.fromISO(iso).setZone(zone).toFormat('dd/MM'));};\nconst fmt=(iso)=>dayWord(iso)+' às '+fmtTime(iso);\nif (!res || res.status!=='options' || !Array.isArray(res.slots) || res.slots.length===0) {\n  return { json: { conversation_id: conv, action:'escalate', reason:'Pedido de marcação, sem vagas disponíveis para oferecer' } };\n}\nconst clinic = ctx.clinic_name || 'a clínica';\nconst patient = (ctx.patient && ctx.patient.name) || '';\nconst firstName = (patient && !/^Novo contacto/.test(patient)) ? patient.split(' ')[0] : '';\nconst single = res.slots.length === 1;\nconst substitute = res.doctor_unavailable === true;\nconst primaryName = (ctx.patient && ctx.patient.primary_doctor_name) || '';\nlet facts;\nif (res.requested && single) {\n  const s=res.slots[0];\n  facts = res.exact\n    ? ('O paciente pediu as '+res.requested+' e HÁ vaga EXATAMENTE a essa hora: '+fmt(s.start_time)+(s.doctor_name?(' com '+s.doctor_name):'')+'. É a hora que ele pediu, NÃO uma aproximação. Objetivo: confirmar com simpatia que temos vaga à hora que pediu e perguntar se pode ser.')\n    : ('O paciente pediu por volta das '+res.requested+', mas não há vaga a essa hora exata. A vaga livre mais próxima é '+fmt(s.start_time)+(s.doctor_name?(' com '+s.doctor_name):'')+'. Objetivo: dizer com simpatia que a hora pedida não está livre e propor esta, a mais próxima.');\n} else {\n  facts = 'Vagas disponíveis (todas reais, use tal e qual): '\n    + res.slots.map(s => fmt(s.start_time)+(s.doctor_name?(' com '+s.doctor_name):'')).join('; ')\n    + '. Objetivo: apresentar estas opções de forma simpática e perguntar qual prefere.';\n}\nif (substitute) {\n  facts = (primaryName ? ('O médico/médica habitual do paciente, '+primaryName+', não tem vaga disponível nesse período. ') : 'O médico/médica habitual do paciente não tem vaga disponível nesse período. ')\n    + facts\n    + ' Objetivo adicional: deixar claro que é uma substituição só para desta vez (não muda o médico habitual do paciente) e pedir confirmação antes de avançar.';\n}\nconst closeRule = single\n  ? 'Há apenas UMA vaga: termine com uma pergunta natural de confirmação (ex.: \"fica-lhe bem?\", \"pode ser?\", \"confirmo?\"). NÃO pergunte \"qual prefere\" nem \"qual lhe dá mais jeito\". '\n  : 'Há várias vagas: convide a escolher de forma natural (ex.: \"qual lhe dá mais jeito?\", \"qual prefere?\"). ';\nconst system = 'É rececionista da '+clinic+', em Portugal, e escreve como uma pessoa real: cordial, natural e breve. '\n  + 'Português europeu formal (\"você\"), ou inglês se o paciente escreveu em inglês. Nunca se apresenta nem inventa nomes. '\n  + (firstName ? ('Trate o paciente por \"'+firstName+'\". ') : '')\n  + 'Escreva UMA mensagem curta em linguagem corrida (NUNCA use listas numeradas, \"1)\", \"2)\", nem bullets). '\n  + closeRule\n  + 'Não peça um formato rígido tipo \"responda SIM ou NÃO\" nem para responder com um número. '\n  + 'Se os factos disserem que há vaga À HORA pedida, confirme que é exatamente essa hora; NUNCA escreva \"perto\", \"próximo\", \"por volta\" nem \"aproximado\". Só fale numa vaga \"mais próxima\" se os factos disserem que a hora pedida NÃO está disponível. '\n  + (substitute ? 'Os factos indicam que é uma substituição pontual do médico habitual: mencione isso com simpatia (ex.: \"só desta vez\", \"excecionalmente\") e deixe claro que não muda o médico habitual do paciente. ' : '')\n  + 'REGRA ABSOLUTA: copie horas, datas e nomes EXATAMENTE como aparecem nos factos; nunca invente nem altere um número. '\n  + 'NÃO escreva nenhuma linha sobre STOP nem sobre cancelar subscrição; isso é acrescentado automaticamente quando necessário. '\n  + 'Responda APENAS com o texto da mensagem.';\nreturn { json: { conversation_id: conv, action:'humanize', system_prompt: system, user_prompt: facts } };"
+      },
+      "id": "build-offer",
+      "name": "Build offer msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        16
+      ],
+      "notes": "Build offer msg"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "humanize",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "found-if",
+      "name": "Offer found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4800,
+        16
+      ],
+      "notes": "Offer found?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Build offer msg').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.choices[0].message.content) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "send-offer",
+      "name": "Send offer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5248,
+        -80
+      ],
+      "notes": "Send offer"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_escalate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_category\": \"booking_request\",\n  \"p_reason\": {{ JSON.stringify($json.reason) }},\n  \"p_priority\": \"normal\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "offer-esc",
+      "name": "Offer escalate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5024,
+        112
+      ],
+      "notes": "Offer escalate"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "booking_choice",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bk-choice",
+      "name": "Booking choice?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        992,
+        208
+      ],
+      "notes": "Booking choice?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $('agent_context').item.json;\nconst offered = ctx.offered_slots || [];\nconst messages = ctx.messages || [];\nconst pm = messages.filter(m => m.sender_type === 'patient');\nconst last = $('agent_inbound_batch').item.json.joined_body || (pm[pm.length - 1] || {}).body || '';\nconst zone = 'Europe/Lisbon';\nconst now = DateTime.now().setZone(zone);\nconst today = now.toFormat('yyyy-MM-dd');\nconst weekday = now.setLocale('pt').toFormat('cccc');\nconst fmt = (iso) => { const d = DateTime.fromISO(iso).setZone(zone); const t0 = now.startOf('day'); const diff = Math.round(d.startOf('day').diff(t0,'days').days); const day = diff===0?'hoje':(diff===1?'amanhã':d.toFormat('dd/MM')); return day + ' às ' + d.toFormat('HH:mm'); };\nconst list = offered.map((s,i) => (i+1) + ') ' + fmt(s.start_time) + (s.doctor_name?(' com '+s.doctor_name):'') + ' [slot_id=' + s.slot_id + ']').join('\\n');\nconst single = offered.length === 1;\nconst system = 'Hoje é ' + today + ' (' + weekday + '), fuso Europe/Lisbon. O paciente respondeu a uma oferta de ' + (single ? 'uma vaga mais cedo' : 'vagas') + ':\\n' + list + '\\n\\n'\n  + 'Interprete a última mensagem e devolva JSON estrito {\"slot_id\":\"<id>\"|null,\"decline\":true|false,\"other_time\":true|false,\"date\":\"YYYY-MM-DD\"|null,\"from\":\"HH:MM\"|null,\"to\":\"HH:MM\"|null}.\\n'\n  + (single\n      ? '- Se concordar (ex.: \"sim\", \"pode ser\", \"quero\", \"aceito\", \"claro\"), devolva o slot_id da vaga.\\n'\n      : '- Se escolher uma opção (por número, hora ou dia), devolva o slot_id correspondente.\\n')\n  + '- Se PEDIR outro horário/dia que NÃO está na lista (ex.: \"pode ser às 15h?\", \"tem algo quinta de manhã?\", \"só à tarde\", \"e à tarde?\"), devolva other_time=true, slot_id=null, decline=false, e preencha date/from/to: dia -> date (resolva \"amanhã\"/\"quinta\"/\"dia 20\" para YYYY-MM-DD); hora aproximada (\"por volta das 16h\",\"às 15h\") -> from=essa hora, to=null; \"de manhã\" -> from=08:00,to=13:00; \"à tarde\" -> from=13:00,to=19:00; \"ao fim do dia\"/\"fim da tarde\" -> from=16:00,to=19:00; null no que não indicar.\\n'\n  + '- Se recusar ou quiser manter a marcação atual (ex.: \"não\", \"deixa estar\", \"fico como está\"), devolva decline=true.\\n'\n  + '- Se não for claro, devolva tudo null/false.\\nUse APENAS os slot_id listados; nunca invente slot_id.';\nconst user = 'Mensagem do paciente: ' + JSON.stringify(last);\nreturn { json: { conversation_id: ctx.conversation_id, system_prompt: system, user_prompt: user } };"
+      },
+      "id": "bk-build",
+      "name": "Build match prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        784
+      ],
+      "notes": "Build match prompt"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.1-8b-instant\",\n  \"temperature\": 0,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.user_prompt) }} }\n  ]\n}",
+        "options": {}
+      },
+      "id": "bk-groq",
+      "name": "Match choice (8B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        784
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const parsed = JSON.parse($json.choices[0].message.content);\nconst ctx = $('agent_context').item.json;\nconst offered = ctx.offered_slot_ids || [];\nlet clsCat = 'UNCLEAR';\ntry { clsCat = (JSON.parse($('Classify intent (Groq 8B)').item.json.choices[0].message.content).category || 'UNCLEAR').toUpperCase(); } catch (e) {}\n\n// 1) Did they pick one of the offered slots?\nlet slot_id = parsed.slot_id || null;\nif (slot_id && offered.indexOf(slot_id) === -1) slot_id = null;\n// Only trust the generic accept fallback when Match choice (8B) itself found\n// nothing else going on -- it must never override an explicit signal that this\n// was NOT a plain acceptance (other_time/decline), or a smaller, less-informed\n// classifier can force a wrong booking. Reproduced live: \"gostaria que fosse\n// com o Dr sousa\" -> Match choice correctly said other_time:true, slot_id:null,\n// but the generic classifier's ACCEPT tag (misread as agreement) overrode it\n// and booked the wrong doctor with zero confirmation.\nconst matchWasExplicit = parsed.other_time === true || parsed.decline === true;\nif (!slot_id && !matchWasExplicit && offered.length === 1 && clsCat === 'ACCEPT') slot_id = offered[0];\nif (slot_id) return { json: { conversation_id: ctx.conversation_id, action: 'book', slot_id } };\n\n// The day currently under discussion = date of the slots we last offered.\nconst offeredSlots = ctx.offered_slots || [];\nconst ctxDate = offeredSlots.length\n  ? DateTime.fromISO(offeredSlots[0].start_time).setZone('Europe/Lisbon').toFormat('yyyy-MM-dd')\n  : null;\n\nconst pm = (ctx.messages || []).filter(m => m.sender_type === 'patient');\nconst lastMsg = ((pm[pm.length - 1] || {}).body || '').toLowerCase();\n\n// 2) A specific doctor mentioned by name (patient-initiated, e.g. \"pode ser\n// com o Dr Sousa?\") -> retarget the search to that doctor for the same day\n// already under discussion. Deterministic surname match against the real\n// roster, never an LLM guess. This is a PATIENT request, so it becomes a\n// permanent primary-doctor reassignment on booking (lock_doctor:true) --\n// unlike an agent-offered substitute, which never locks. Reproduced live:\n// this used to fall through to a generic reask that ignored the doctor\n// question entirely.\nconst doctors = ctx.doctors || [];\nlet reqDoctorId = null;\nfor (const d of doctors) {\n  const surname = d.name.trim().split(/\\s+/).pop().toLowerCase();\n  if (surname && lastMsg.includes(surname)) { reqDoctorId = d.id; break; }\n}\nif (reqDoctorId) {\n  return { json: { conversation_id: ctx.conversation_id, action: 'retime',\n    req_date: ctxDate || null, req_from: null, req_to: null,\n    req_doctor_id: reqDoctorId, lock_doctor: true } };\n}\n\n// 3) Deterministic period words override the small model (reliable, closed set).\nlet ovFrom = null, ovTo = null, ovHit = false;\nif (/fim do dia|fim da tarde|final do dia|final da tarde|ao fim da tarde/.test(lastMsg)) { ovFrom='16:00'; ovTo='19:00'; ovHit=true; }\nelse if (/almo[çc]o/.test(lastMsg)) { ovFrom='12:00'; ovTo='14:00'; ovHit=true; }\nelse if (/manh[ãa]/.test(lastMsg)) { ovFrom='08:00'; ovTo='13:00'; ovHit=true; }\nelse if (/\\btarde\\b/.test(lastMsg)) { ovFrom='13:00'; ovTo='19:00'; ovHit=true; }\n\n// 4) A specific different time/day, or a period word -> targeted search.\n//    Default the day to the one being discussed when the reply omits it.\nconst wantsOther = ovHit || (parsed.other_time === true && (parsed.date || parsed.from));\nif (wantsOther) {\n  return { json: { conversation_id: ctx.conversation_id, action: 'retime',\n    req_date: parsed.date || ctxDate || null,\n    req_from: ovHit ? ovFrom : (parsed.from || null),\n    req_to:   ovHit ? ovTo   : (parsed.to   || null) } };\n}\n\nif (parsed.decline === true || clsCat === 'DECLINE') return { json: { conversation_id: ctx.conversation_id, action: 'decline' } };\nreturn { json: { conversation_id: ctx.conversation_id, action: 'reask', message: 'Desculpe, não percebi bem. Diga-me só a hora ou o período que prefere, ou se quer manter como está.' } };"
+      },
+      "id": "bk-route",
+      "name": "Route match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        784
+      ],
+      "notes": "Route match"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "book",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bk-matched",
+      "name": "Matched?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        784
+      ],
+      "notes": "Matched?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/book_slot",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\", \"p_slot_id\": \"{{ $json.slot_id }}\" }",
+        "options": {}
+      },
+      "id": "bk-book",
+      "name": "book_slot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2112,
+        1072
+      ],
+      "notes": "book_slot"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const res = $json; // book_slot result\nconst conv = $('Route match').item.json.conversation_id;\nconst p = $('agent_context').item.json.patient;\nconst isPlaceholder = /^Novo contacto/.test((p && p.name) || '');\nconst zone = 'Europe/Lisbon';\nconst fmt = (iso) => { const d = DateTime.fromISO(iso).setZone(zone); const today = DateTime.now().setZone(zone).startOf('day'); const diff = Math.round(d.startOf('day').diff(today,'days').days); const day = diff===0?'hoje':(diff===1?'amanhã':d.toFormat('dd/MM')); return day + ' às ' + d.toFormat('HH:mm'); };\nlet message;\nif (res && res.status === 'booked') {\n  message = 'Perfeito! Fica marcado para ' + fmt(res.start_time) + (res.doctor_name?(' com '+res.doctor_name):'') + '.';\n  message += isPlaceholder ? ' Para completar o registo, pode dizer-me o seu nome?' : ' Até lá!';\n} else {\n  message = 'Peço desculpa, essa vaga já foi ocupada entretanto. Pode escolher outra das opções?';\n}\nreturn { json: { conversation_id: conv, message } };"
+      },
+      "id": "bk-confirm",
+      "name": "Confirm booking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        1072
+      ],
+      "notes": "Confirm booking"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.message) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "bk-sendok",
+      "name": "Send booking result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        1072
+      ],
+      "notes": "Send booking result"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.message) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "bk-reask",
+      "name": "Send reask",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        880
+      ],
+      "notes": "Send reask"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "decline",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bk-declined",
+      "name": "Declined?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        784
+      ],
+      "notes": "Declined?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/booking_decline",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "bk-decline",
+      "name": "booking_decline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        688
+      ],
+      "notes": "booking_decline"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Route match').item.json.conversation_id }}\",\n  \"p_body\": \"Sem problema, mantemos a sua marcação. Até breve.\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "bk-senddecline",
+      "name": "Send decline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2784,
+        688
+      ],
+      "notes": "Send decline"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = ($('agent_inbound_batch').item.json.joined_body || '').trim();\nconst ctx = $('agent_context').item.json;\n// Tokenize on non-letters so STOP/START are recognized as standalone words\n// anywhere in the message (RGPD; also \"nao posso, STOP\" = decline + opt-out).\nconst tokens = body.toUpperCase().split(/[^A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ]+/).filter(Boolean);\nconst STOP  = ['STOP','PARAR','PARE','SAIR','REMOVER','CHEGA'];\nconst START = ['START','ATIVAR','SUBSCREVER','RETOMAR','INICIAR'];\nlet action = 'continue';\n// STOP wins over START if both appear.\nif (tokens.some(t => STOP.includes(t))) action = 'opt_out';\nelse if (tokens.some(t => START.includes(t))) action = 'opt_in';\nreturn { json: { action, conversation_id: ctx.conversation_id } };"
+      },
+      "id": "oo-check",
+      "name": "Check opt-out",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        96,
+        112
+      ],
+      "notes": "Check opt-out"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "continue",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "oo-cont",
+      "name": "Continue?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        320,
+        112
+      ],
+      "notes": "Continue?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const a = $json.action;\nconst conv = $json.conversation_id;\nif (a === 'opt_out') return { json: { conversation_id: conv, rpc: 'patient_opt_out', message: 'Registámos o seu pedido. Não voltará a receber mensagens automáticas desta clínica. Responda START para reativar.' } };\nreturn { json: { conversation_id: conv, rpc: 'patient_opt_in', message: 'Subscrição reativada. Voltará a receber as nossas mensagens. Obrigado.' } };"
+      },
+      "id": "oo-route",
+      "name": "Opt route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        -656
+      ],
+      "notes": "Opt route"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/{{ $json.rpc }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "oo-call",
+      "name": "Call opt RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        768,
+        -656
+      ],
+      "notes": "Call opt RPC"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Opt route').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($('Opt route').item.json.message) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "oo-send",
+      "name": "Send opt confirm",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        992,
+        -656
+      ],
+      "notes": "Send opt confirm"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $('agent_context').item.json.patient.name }}",
+              "rightValue": "Novo contacto",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "nm-isnew",
+      "name": "New contact?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        96,
+        976
+      ],
+      "notes": "New contact?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = ($('agent_inbound_batch').item.json.joined_body || '').trim();\nconst conv = $('agent_context').item.json.conversation_id;\nconst system = 'És um assistente que regista o nome do paciente. Este contacto ainda não tem nome. Se o paciente indicar o SEU nome (ex.: \"chamo-me João Silva\", \"sou a Maria Santos\", \"o meu nome é ...\"), devolve-o com maiúsculas iniciais. Se não indicar um nome, ou se tiveres dúvida, devolve null. Nunca uses o nome do médico nem inventes. Devolve JSON estrito {\"name\":\"Nome Apelido\"|null}.';\nreturn { json: { conversation_id: conv, system_prompt: system, user_prompt: body } };"
+      },
+      "id": "nm-build",
+      "name": "Build name prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        976
+      ],
+      "notes": "Build name prompt"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.1-8b-instant\",\n  \"temperature\": 0,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.user_prompt) }} }\n  ]\n}",
+        "options": {}
+      },
+      "id": "nm-extract",
+      "name": "Extract name (Groq 8B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        544,
+        976
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const parsed = JSON.parse($json.choices[0].message.content);\nconst conv = $('Build name prompt').item.json.conversation_id;\nlet name = (parsed && parsed.name) ? String(parsed.name).trim() : '';\n// Deterministic Title Case (don't trust the model's casing).\nif (name) name = name.toLocaleLowerCase('pt-PT').replace(/(^|[\\s\\-'])([\\p{L}])/gu, (m,a,b)=>a+b.toLocaleUpperCase('pt-PT'));\nreturn { json: { conversation_id: conv, name, has_name: name.length >= 2 } };"
+      },
+      "id": "nm-apply",
+      "name": "Apply name",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        976
+      ],
+      "notes": "Apply name"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.has_name }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "nm-has",
+      "name": "Has name?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        992,
+        976
+      ],
+      "notes": "Has name?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/patient_set_name",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_name\": {{ JSON.stringify($json.name) }}\n}",
+        "options": {}
+      },
+      "id": "nm-set",
+      "name": "patient_set_name",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1216,
+        976
+      ],
+      "notes": "patient_set_name"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $('Call opt RPC').item.json.advance_cascade }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "oo-advance",
+      "name": "Opt advance?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.II_CASCADE_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-webhook-secret",
+              "value": "={{ $env.II_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"type\": \"slot_cancelled\",\n  \"slot_id\": \"{{ $('Call opt RPC').item.json.slot_id }}\"\n}",
+        "options": {}
+      },
+      "id": "oo-repost",
+      "name": "Opt re-post to WF-B",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "retime",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bk-retime",
+      "name": "Retime?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2112,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/find_availability_window",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_date\": {{ $json.req_date ? JSON.stringify($json.req_date) : 'null' }},\n  \"p_from\": {{ $json.req_from ? JSON.stringify($json.req_from) : 'null' }},\n  \"p_to\": {{ $json.req_to ? JSON.stringify($json.req_to) : 'null' }},\n  \"p_limit\": 3,\n  \"p_doctor_id\": {{ $json.req_doctor_id ? JSON.stringify($json.req_doctor_id) : 'null' }},\n  \"p_lock_doctor\": {{ !!$json.lock_doctor }}\n}",
+        "options": {}
+      },
+      "id": "bk-faw",
+      "name": "find_availability_window",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2336,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const res = $json;\nconst ctx = $('agent_context').item.json;\nconst conv = $('Route match').item.json.conversation_id;\nconst zone='Europe/Lisbon';\nconst fmtTime=(iso)=>DateTime.fromISO(iso).setZone(zone).toFormat('HH:mm');\nconst dayWord=(iso)=>{const d=DateTime.fromISO(iso).setZone(zone).startOf('day');const t=DateTime.now().setZone(zone).startOf('day');const diff=Math.round(d.diff(t,'days').days);return diff===0?'hoje':(diff===1?'amanhã':DateTime.fromISO(iso).setZone(zone).toFormat('dd/MM'));};\nconst fmt=(iso)=>dayWord(iso)+' às '+fmtTime(iso);\nif (!res || res.status !== 'options' || !Array.isArray(res.slots) || res.slots.length === 0) {\n  return { json: { conversation_id: conv, action: 'escalate', message: 'Peço desculpa, para essa altura não tenho vaga disponível de momento. Vou pedir à receção que veja outras opções consigo.', reason: 'Paciente pediu um horário sem vaga disponível' } };\n}\nconst clinic = ctx.clinic_name || 'a clínica';\nconst patient = (ctx.patient && ctx.patient.name) || '';\nconst firstName = (patient && !/^Novo contacto/.test(patient)) ? patient.split(' ')[0] : '';\nconst single = res.slots.length === 1;\nlet facts;\nif (res.requested && single) {\n  const s=res.slots[0];\n  facts = res.exact\n    ? ('O paciente pediu as '+res.requested+' e HÁ vaga EXATAMENTE a essa hora: '+fmt(s.start_time)+(s.doctor_name?(' com '+s.doctor_name):'')+'. É a hora que ele pediu, NÃO uma aproximação. Objetivo: confirmar com simpatia que temos vaga à hora que pediu e perguntar se pode ser.')\n    : ('O paciente pediu por volta das '+res.requested+', mas não há vaga a essa hora exata. A vaga livre mais próxima é '+fmt(s.start_time)+(s.doctor_name?(' com '+s.doctor_name):'')+'. Objetivo: dizer com simpatia que a hora pedida não está livre e propor esta, a mais próxima.');\n} else {\n  facts = 'Vaga(s) para a altura que o paciente pediu (reais, use tal e qual): '\n    + res.slots.map(s => fmt(s.start_time)+(s.doctor_name?(' com '+s.doctor_name):'')).join('; ')\n    + '. Objetivo: dizer de forma simpática que tem esta(s) vaga(s) e perguntar se lhe convém.';\n}\nconst closeRule = single\n  ? 'Há apenas UMA vaga: termine com uma pergunta natural de confirmação (ex.: \"fica-lhe bem?\", \"pode ser?\", \"confirmo?\"). NÃO pergunte \"qual prefere\" nem \"qual lhe dá mais jeito\". '\n  : 'Há várias vagas: convide a escolher de forma natural (ex.: \"qual lhe dá mais jeito?\", \"qual prefere?\"). ';\nconst system = 'É rececionista da '+clinic+', em Portugal, e escreve como uma pessoa real: cordial, natural e breve. '\n  + 'Português europeu formal (\"você\"), ou inglês se o paciente escreveu em inglês. Nunca se apresenta nem inventa nomes. '\n  + (firstName ? ('Trate o paciente por \"'+firstName+'\". ') : '')\n  + 'Escreva UMA mensagem curta em linguagem corrida (NUNCA use listas numeradas, \"1)\", \"2)\", nem bullets). '\n  + closeRule\n  + 'Não peça um formato rígido tipo \"responda SIM ou NÃO\" nem para responder com um número. '\n  + 'Se os factos disserem que há vaga À HORA pedida, confirme que é exatamente essa hora; NUNCA escreva \"perto\", \"próximo\", \"por volta\" nem \"aproximado\". Só fale numa vaga \"mais próxima\" se os factos disserem que a hora pedida NÃO está disponível. '\n  + 'REGRA ABSOLUTA: copie horas, datas e nomes EXATAMENTE como aparecem nos factos; nunca invente nem altere um número. '\n  + 'NÃO escreva nenhuma linha sobre STOP nem sobre cancelar subscrição; isso é acrescentado automaticamente quando necessário. '\n  + 'Responda APENAS com o texto da mensagem.';\nreturn { json: { conversation_id: conv, action: 'humanize', system_prompt: system, user_prompt: facts } };"
+      },
+      "id": "bk-retmsg",
+      "name": "Build retime msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "humanize",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bk-retfound",
+      "name": "Retime found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2784,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Build retime msg').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.choices[0].message.content) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "bk-retoffer",
+      "name": "Send retime offer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3232,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.message) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "bk-retnone",
+      "name": "Send retime none",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3008,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_escalate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Build retime msg').item.json.conversation_id }}\",\n  \"p_category\": \"booking_request\",\n  \"p_reason\": {{ JSON.stringify($('Build retime msg').item.json.reason) }},\n  \"p_priority\": \"normal\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "bk-retesc",
+      "name": "Retime escalate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3232,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.2,\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.user_prompt) }} }\n  ]\n}",
+        "options": {}
+      },
+      "id": "bk-humoffer",
+      "name": "Humanize offer (70B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5024,
+        -80
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.2,\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.user_prompt) }} }\n  ]\n}",
+        "options": {}
+      },
+      "id": "bk-humret",
+      "name": "Humanize retime (70B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3008,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "amount": 6
+      },
+      "id": "7fd473fb-6e51-4221-ac79-37d9384cbb09",
+      "name": "Debounce wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -800,
+        208
+      ],
+      "webhookId": "6435e9d5-f0c9-4311-9f37-1a0845dbd465",
+      "notes": "Gives a patient who splits a thought across several texts time to finish before we process any of them. Each inbound message gets its own execution and its own wait; agent_inbound_batch (next) discards every execution except the one for the newest message."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_inbound_batch",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_message_id\": \"{{ $('Webhook (patient reply)').item.json.body.message_id }}\" }",
+        "options": {}
+      },
+      "id": "ef341c52-2f60-4b69-80cb-fa0d0d44270b",
+      "name": "agent_inbound_batch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -576,
+        208
+      ],
+      "notes": "Returns {proceed, conversation_id, joined_body}. proceed=false means a newer patient message has already arrived for this conversation -> this execution stops here."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.proceed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "909c3d10-e77b-4d96-ac77-e48befa09a5a",
+      "name": "Proceed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "cancel_request",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c775c72b-5cb0-4ebc-ab5b-f83b96e875f0",
+      "name": "Cancel request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3680,
+        -432
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/booking_cancel_request",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "648c5b91-8daf-490b-abca-5606b6c2ca1f",
+      "name": "booking_cancel_request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3904,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Route assist').item.json.conversation_id }}\",\n  \"p_body\": \"Antes de cancelar, gostaria de remarcar para outro dia ou hora em vez disso? Se preferir mesmo cancelar, é só dizer.\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "b99b81c3-b77a-4d58-89c1-ec1090d90b77",
+      "name": "Send cancel nudge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4128,
+        -240
+      ],
+      "notes": "Never cancels on the first ask. Sets cancel_pending so the next reply is read as confirm-cancel vs changed-mind-to-reschedule (see Cancel choice? below)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "cancel_choice",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "beef08ff-3c6b-4c6d-b130-548fd1e9e70e",
+      "name": "Cancel choice?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $('agent_context').item.json;\nconst route = $('Route').item.json;\nconst batch = $('agent_inbound_batch').item.json;\nconst pm = (ctx.messages || []).filter(m => m.sender_type === 'patient');\nconst last = (batch && batch.joined_body) || (pm[pm.length - 1] || {}).body || '';\nconst system = 'O paciente foi convidado a remarcar a consulta em vez de a cancelar. Interprete a última mensagem dele e responda em JSON estrito: {\"decision\":\"cancel\"|\"reschedule\"|\"unclear\"}.\\n'\n  + '- \"cancel\" se insistir em cancelar e não quiser remarcar (ex.: \"não\", \"quero mesmo cancelar\", \"só cancelar\", \"não quero remarcar\", \"pode cancelar\").\\n'\n  + '- \"reschedule\" se aceitar remarcar ou pedir uma nova data/hora (ex.: \"sim\", \"pode ser\", \"afinal remarca\", \"terça de manhã\").\\n'\n  + '- \"unclear\" se não for claro nenhum dos dois.';\nreturn { json: { conversation_id: route.conversation_id, system_prompt: system, user_prompt: last } };"
+      },
+      "id": "d1b2cb3b-f923-43e3-a93a-cabfda8aa383",
+      "name": "Build cancel match prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -464
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.1-8b-instant\",\n  \"temperature\": 0,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.user_prompt) }} }\n  ]\n}",
+        "options": {}
+      },
+      "id": "c45ba8b7-1223-4213-b3a1-5a69f848e6d5",
+      "name": "Match cancel choice (8B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1664,
+        -464
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const parsed = JSON.parse($json.choices[0].message.content);\nconst conv = $('Build cancel match prompt').item.json.conversation_id;\nconst decision = String(parsed.decision || 'unclear').toLowerCase();\nlet action = 'cancel_reask';\nif (decision === 'cancel') action = 'do_cancel';\nelse if (decision === 'reschedule') action = 'go_reschedule';\nreturn { json: { conversation_id: conv, action } };"
+      },
+      "id": "181dbe73-f360-4dc0-8ff4-0633f5b99891",
+      "name": "Route cancel match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        -464
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "do_cancel",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b91f93fb-a99e-4ef8-91ef-947f6428b966",
+      "name": "Cancel decision?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2112,
+        -464
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/booking_cancel",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "fd2a75f2-12e6-4dd5-b1ff-64f197cacc52",
+      "name": "booking_cancel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2336,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const res = $json; // booking_cancel result\nconst conv = $('Route cancel match').item.json.conversation_id;\nconst zone = 'Europe/Lisbon';\nconst fmt = (iso) => { const d = DateTime.fromISO(iso).setZone(zone); const today = DateTime.now().setZone(zone).startOf('day'); const diff = Math.round(d.startOf('day').diff(today,'days').days); const day = diff===0?'hoje':(diff===1?'amanhã':d.toFormat('dd/MM')); return day + ' às ' + d.toFormat('HH:mm'); };\nlet message;\nif (res && res.status === 'cancelled') {\n  message = 'Feito, a sua consulta de ' + fmt(res.start_time) + (res.doctor_name?(' com '+res.doctor_name):'') + ' foi cancelada. Se precisar, estamos cá.';\n} else {\n  message = 'Não encontrei nenhuma consulta marcada para cancelar — a receção entra em contacto consigo.';\n}\nreturn { json: { conversation_id: conv, message } };"
+      },
+      "id": "6b4b4bc9-ee27-4fca-9f8e-9366ba0cb38b",
+      "name": "Build cancel result msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.message) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "984f7e52-80a7-4872-98a5-fdadf04fee81",
+      "name": "Send cancel result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2784,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "go_reschedule",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c27876f0-ff48-4278-a623-be631fa91809",
+      "name": "Reschedule instead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        -368
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/booking_cancel_dismiss",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "c5ffc0ad-6c5c-485e-bc27-e19712b04ee7",
+      "name": "booking_cancel_dismiss",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        -464
+      ],
+      "notes": "Patient changed their mind and wants to reschedule instead of cancelling. Clears cancel_pending, then re-enters the normal assist/offer flow on the same message."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $json.conversation_id }}\",\n  \"p_body\": \"Desculpe, não percebi bem. Prefere remarcar para outro dia, ou quer mesmo cancelar a consulta?\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "0735f4ca-9237-4eef-87cf-b6fdbd3576cc",
+      "name": "Send cancel reask",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "none",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "leftValue": "={{ $('Route assist').item.json.doctor_source }}",
+              "rightValue": "primary",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4c541426-c68f-4937-bbe6-33b087bf50d8",
+      "name": "Doctor unavailable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3904,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/find_availability_window",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Route assist').item.json.conversation_id }}\",\n  \"p_date\": {{ $('Route assist').item.json.date ? JSON.stringify($('Route assist').item.json.date) : 'null' }},\n  \"p_from\": {{ $('Route assist').item.json.from ? JSON.stringify($('Route assist').item.json.from) : 'null' }},\n  \"p_to\": {{ $('Route assist').item.json.to ? JSON.stringify($('Route assist').item.json.to) : 'null' }},\n  \"p_limit\": 3\n}",
+        "options": {}
+      },
+      "id": "8fcd6569-7b20-45de-a8a8-e61ac9034061",
+      "name": "find_availability_window (fallback)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4128,
+        -48
+      ],
+      "notes": "The patient's primary doctor genuinely had nothing in this window (find_availability returned none, filtered by doctor_source=primary). Re-search with no doctor filter -> Mark substitute flags this for Build offer msg so it's framed as a one-time-only substitute, never a doctor change."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return { json: { ...$json, doctor_unavailable: true } };"
+      },
+      "id": "77d45369-032c-4ae7-8c42-da8efb9be750",
+      "name": "Mark substitute",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        4352,
+        -48
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook (patient reply)": {
+      "main": [
+        [
+          {
+            "node": "Verify secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agent_context": {
+      "main": [
+        [
+          {
+            "node": "Check opt-out",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "New contact?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify intent (Groq 8B)": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Booking choice?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate?": {
+      "main": [
+        [
+          {
+            "node": "agent_escalate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot action?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot action?": {
+      "main": [
+        [
+          {
+            "node": "Call slot RPC",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build assist prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call slot RPC": {
+      "main": [
+        [
+          {
+            "node": "After RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "After RPC": {
+      "main": [
+        [
+          {
+            "node": "Send acknowledgement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send acknowledgement": {
+      "main": [
+        [
+          {
+            "node": "Advance cascade?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Advance cascade?": {
+      "main": [
+        [
+          {
+            "node": "Re-post to WF-B",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build assist prompt": {
+      "main": [
+        [
+          {
+            "node": "Assist (Groq 70B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assist (Groq 70B)": {
+      "main": [
+        [
+          {
+            "node": "Route assist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route assist": {
+      "main": [
+        [
+          {
+            "node": "Offer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assist: escalate?": {
+      "main": [
+        [
+          {
+            "node": "Assist escalate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Offer?": {
+      "main": [
+        [
+          {
+            "node": "find_availability",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cancel request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build offer msg": {
+      "main": [
+        [
+          {
+            "node": "Offer found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Offer found?": {
+      "main": [
+        [
+          {
+            "node": "Humanize offer (70B)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Offer escalate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Booking choice?": {
+      "main": [
+        [
+          {
+            "node": "Build match prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cancel choice?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build match prompt": {
+      "main": [
+        [
+          {
+            "node": "Match choice (8B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match choice (8B)": {
+      "main": [
+        [
+          {
+            "node": "Route match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route match": {
+      "main": [
+        [
+          {
+            "node": "Matched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matched?": {
+      "main": [
+        [
+          {
+            "node": "book_slot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retime?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "book_slot": {
+      "main": [
+        [
+          {
+            "node": "Confirm booking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm booking": {
+      "main": [
+        [
+          {
+            "node": "Send booking result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Declined?": {
+      "main": [
+        [
+          {
+            "node": "booking_decline",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send reask",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "booking_decline": {
+      "main": [
+        [
+          {
+            "node": "Send decline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check opt-out": {
+      "main": [
+        [
+          {
+            "node": "Continue?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue?": {
+      "main": [
+        [
+          {
+            "node": "Classify intent (Groq 8B)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Opt route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Opt route": {
+      "main": [
+        [
+          {
+            "node": "Call opt RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call opt RPC": {
+      "main": [
+        [
+          {
+            "node": "Send opt confirm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New contact?": {
+      "main": [
+        [
+          {
+            "node": "Build name prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Build name prompt": {
+      "main": [
+        [
+          {
+            "node": "Extract name (Groq 8B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract name (Groq 8B)": {
+      "main": [
+        [
+          {
+            "node": "Apply name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply name": {
+      "main": [
+        [
+          {
+            "node": "Has name?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has name?": {
+      "main": [
+        [
+          {
+            "node": "patient_set_name",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Send opt confirm": {
+      "main": [
+        [
+          {
+            "node": "Opt advance?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Opt advance?": {
+      "main": [
+        [
+          {
+            "node": "Opt re-post to WF-B",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retime?": {
+      "main": [
+        [
+          {
+            "node": "find_availability_window",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Declined?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "find_availability_window": {
+      "main": [
+        [
+          {
+            "node": "Build retime msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build retime msg": {
+      "main": [
+        [
+          {
+            "node": "Retime found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retime found?": {
+      "main": [
+        [
+          {
+            "node": "Humanize retime (70B)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send retime none",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send retime none": {
+      "main": [
+        [
+          {
+            "node": "Retime escalate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Humanize offer (70B)": {
+      "main": [
+        [
+          {
+            "node": "Send offer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Humanize retime (70B)": {
+      "main": [
+        [
+          {
+            "node": "Send retime offer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify secret": {
+      "main": [
+        [
+          {
+            "node": "Debounce wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Debounce wait": {
+      "main": [
+        [
+          {
+            "node": "agent_inbound_batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agent_inbound_batch": {
+      "main": [
+        [
+          {
+            "node": "Proceed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proceed?": {
+      "main": [
+        [
+          {
+            "node": "agent_context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel request?": {
+      "main": [
+        [
+          {
+            "node": "booking_cancel_request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assist: escalate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "booking_cancel_request": {
+      "main": [
+        [
+          {
+            "node": "Send cancel nudge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel choice?": {
+      "main": [
+        [
+          {
+            "node": "Build cancel match prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Escalate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build cancel match prompt": {
+      "main": [
+        [
+          {
+            "node": "Match cancel choice (8B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match cancel choice (8B)": {
+      "main": [
+        [
+          {
+            "node": "Route cancel match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route cancel match": {
+      "main": [
+        [
+          {
+            "node": "Cancel decision?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel decision?": {
+      "main": [
+        [
+          {
+            "node": "booking_cancel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reschedule instead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "booking_cancel": {
+      "main": [
+        [
+          {
+            "node": "Build cancel result msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build cancel result msg": {
+      "main": [
+        [
+          {
+            "node": "Send cancel result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reschedule instead?": {
+      "main": [
+        [
+          {
+            "node": "booking_cancel_dismiss",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send cancel reask",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "booking_cancel_dismiss": {
+      "main": [
+        [
+          {
+            "node": "Build assist prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "find_availability": {
+      "main": [
+        [
+          {
+            "node": "Doctor unavailable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Doctor unavailable?": {
+      "main": [
+        [
+          {
+            "node": "find_availability_window (fallback)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build offer msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "find_availability_window (fallback)": {
+      "main": [
+        [
+          {
+            "node": "Mark substitute",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark substitute": {
+      "main": [
+        [
+          {
+            "node": "Build offer msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  }
+}

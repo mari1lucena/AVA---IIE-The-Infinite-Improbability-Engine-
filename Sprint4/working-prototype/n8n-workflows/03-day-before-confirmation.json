@@ -1,0 +1,338 @@
+{
+  "name": "II - Day-Before Confirmation (WF-C)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 18 * * *"
+            }
+          ]
+        }
+      },
+      "id": "4b6b11e3-c15d-4086-9c04-926579fa0c0e",
+      "name": "Every day 18:30",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Daily at 18:30 (n8n workspace timezone -> set it to Europe/Lisbon in Settings). Opens confirmations for TOMORROW's booked slots. Safe to run more than once a day: confirmations_start skips slots that already have an active confirmation conversation."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/confirmations_start",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "options": {}
+      },
+      "id": "6d9c5a1c-0f54-44ff-8b6c-925f50e1627b",
+      "name": "confirmations_start",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        0
+      ],
+      "notes": "Fat RPC: opens one 'confirmation' conversation per still-booked slot tomorrow and returns a row per slot: { conversation_id, slot_id, patient{name}, slot{start_time,doctor_name} }. Empty [] on a day with nothing to confirm -> the run just ends."
+    },
+    {
+      "parameters": {
+        "jsCode": "// PostgREST returns a JSON array for setof-json RPCs. Normalise to one n8n\n// item per row, regardless of how this n8n version wraps the response.\nconst out = [];\nfor (const it of $input.all()) {\n  const j = it.json;\n  if (Array.isArray(j)) { for (const r of j) out.push({ json: r }); }\n  else if (j && Array.isArray(j.data)) { for (const r of j.data) out.push({ json: r }); }\n  else if (j && j.conversation_id) { out.push({ json: j }); }\n}\nreturn out;"
+      },
+      "id": "d8e2f1a8-c814-468f-a8b5-93f9844a2e2f",
+      "name": "Fan out slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ],
+      "notes": "One item per slot to confirm. If confirmations_start returned [], this emits nothing and the workflow ends cleanly."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_context",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"p_conversation_id\": \"{{ $json.conversation_id }}\" }",
+        "options": {}
+      },
+      "id": "0250feb0-c29f-4875-a99b-57540d250323",
+      "name": "agent_context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        0
+      ],
+      "notes": "Runs once per slot. Gives clinic_name + patient for the persona. The conversation has no messages yet — this is agent-initiated."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const row = $('Fan out slots').item.json;\nconst ctx = $('agent_context').item.json;\nconst zone = 'Europe/Lisbon';\nconst t = DateTime.fromISO(row.slot.start_time).setZone(zone).toFormat('HH:mm');\nconst clinic = ctx.clinic_name || 'a clínica';\nconst patient = (row.patient && row.patient.name) || (ctx.patient && ctx.patient.name) || '';\nconst firstName = patient ? patient.split(' ')[0] : '';\nconst doctor = (row.slot && row.slot.doctor_name) || '';\n// Exact time in code; the model must copy it verbatim.\nconst facts = 'Consulta de amanhã: às ' + t + (doctor ? (' com ' + doctor) : '') + '.'\n  + ' Objetivo: confirmar de forma simpática que o paciente ainda vem, e pedir que avise se não puder.';\nconst system = 'É rececionista da ' + clinic + ', em Portugal, e escreve como uma pessoa real: cordial, natural e breve. '\n  + 'Português europeu formal (\"você\"). Nunca se apresenta nem inventa um nome. '\n  + (firstName ? ('Trate o paciente por \"' + firstName + '\". ') : '')\n  + 'Escreva UMA mensagem curta (1-2 frases) que lembra a consulta de amanhã e pede, de forma natural, '\n  + 'que confirme a presença ou avise se não puder vir (por ex. \"é só responder-me\" ou \"diga-me se mantém\"). '\n  + 'NUNCA imponha um formato rígido tipo \"responda SIM ou NÃO\". '\n  + 'REGRA ABSOLUTA: copie a hora, data e nomes EXATAMENTE como aparecem nos factos; nunca invente nem altere um número. '\n  + 'Termine sempre com: Responda STOP para não receber mais mensagens. '\n  + 'Responda APENAS com o texto da mensagem.';\nreturn { json: { conversation_id: row.conversation_id, system_prompt: system, user_prompt: facts } };"
+      },
+      "id": "0b29232a-0b39-4da5-950d-72cb2bdf2d96",
+      "name": "Build confirm prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "notes": "Formats tomorrow's time in Europe/Lisbon and assembles the system + user prompts. No medical data — only name + time."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT_REF.supabase.co/rest/v1/rpc/agent_send_message",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_conversation_id\": \"{{ $('Build confirm prompt').item.json.conversation_id }}\",\n  \"p_body\": {{ JSON.stringify($json.text.replace(/<think>[\\s\\S]*?<\\/think>/gi, '').trim()) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "7bbf51e0-0d17-44bb-8695-fd338e9ad0b5",
+      "name": "agent_send_message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1328,
+        0
+      ],
+      "notes": "Posts the confirmation with the service_role key -> lands in the /sms thread and staff /conversations console. When the patient replies SIM/NÃO, the inbound trigger fires WF-A, which routes it to confirmation_confirm / confirmation_decline."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/ii-pullforward",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-webhook-secret",
+              "value": "={{ $env.II_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "wfc-trigger-pf",
+      "name": "Trigger phase 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -320,
+        180
+      ],
+      "notes": "Kicks off WF-D (pull-forward) once per confirmation run. WF-D waits PHASE2_DELAY_SECONDS then offers earlier slots."
+    },
+    {
+      "id": "ea93e8d8-ae06-45fe-b1c1-c5581525b439",
+      "name": "Groq model (confirm)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1020,
+        220
+      ],
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0.2,
+          "maxTokensToSample": 4096
+        }
+      }
+    },
+    {
+      "id": "71066f16-92b2-4701-85d6-df8192d70f32",
+      "name": "Gemini model (confirm fallback)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1180,
+        220
+      ],
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash",
+        "options": {
+          "temperature": 0.2
+        }
+      }
+    },
+    {
+      "id": "e9c04b68-164d-4b85-a8ea-625b9e522ae1",
+      "name": "Generate confirmation (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1104,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=/no_think\n\n{{ $('Build confirm prompt').item.json.system_prompt }}\n\n{{ $('Build confirm prompt').item.json.user_prompt }}",
+        "needsFallback": true
+      }
+    }
+  ],
+  "connections": {
+    "Every day 18:30": {
+      "main": [
+        [
+          {
+            "node": "confirmations_start",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Trigger phase 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "confirmations_start": {
+      "main": [
+        [
+          {
+            "node": "Fan out slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan out slots": {
+      "main": [
+        [
+          {
+            "node": "agent_context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agent_context": {
+      "main": [
+        [
+          {
+            "node": "Build confirm prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build confirm prompt": {
+      "main": [
+        [
+          {
+            "node": "Generate confirmation (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate confirmation (LLM)": {
+      "main": [
+        [
+          {
+            "node": "agent_send_message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq model (confirm)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate confirmation (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini model (confirm fallback)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate confirmation (LLM)",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  }
+}
